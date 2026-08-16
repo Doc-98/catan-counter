@@ -2743,7 +2743,7 @@
         }
     }
     function updateGameFromChat(element) {
-        var _a;
+        var _a, _b;
         // If we're waiting for "you" player selection, don't process new messages
         if (isWaitingForYouPlayerSelection)
             return;
@@ -2753,17 +2753,13 @@
         if (checkDuplicateElement(element))
             return;
         let playerName = getPlayerName(element);
-        // getting correct player name when it says "You stole"
+        // "You stole X from Y" names the victim but not the thief, and the thief is
+        // always the current player. This previously read the name off the previous
+        // chat row, assuming it was that player's "moved Robber" message — but any
+        // message can land in between (another player building, buying a dev card),
+        // in which case the steal was credited to the wrong player entirely.
         if (messageText.includes('You stole') && messageText.includes('from')) {
-            // Get the previous sibling element to find the actual player name
-            const previousElement = element.previousElementSibling;
-            if (previousElement) {
-                const actualPlayerName = getPlayerName(previousElement);
-                if (actualPlayerName) {
-                    // Override the playerName with the actual player from previous element
-                    playerName = actualPlayerName;
-                }
-            }
+            playerName = (_b = game.youPlayerName) !== null && _b !== void 0 ? _b : playerName;
         }
         // Scenario 0: Handle "[Player] stole [resource] from you" scenario
         if (messageText.includes('stole') && messageText.includes('from you')) {
