@@ -32,9 +32,40 @@ A Chrome extension that automatically tracks game state for Settlers of Catan ga
 ### 📊 **Real-time Monitoring**
 
 - **Live Updates**: Game state updates automatically as chat messages appear
-- **Page Refresh Recovery**: colonist renders the chat as a virtual scroller that only keeps ~15 messages in the DOM, so on refresh the extension scrolls the chat from top to bottom to rebuild the **entire** game history in chronological order (deduping by each message's `data-index`). A spinner is shown in the overlay while this runs and is replaced by the resource tables once the counts are rebuilt.
+- **Page Refresh / Reconnect Recovery**: colonist renders the chat as a virtual scroller that only keeps ~15 messages in the DOM, so on refresh the extension scrolls the chat from top to bottom to rebuild the **entire** game history. The sweep reads the scroller's live position each step (the scroller corrects its estimated height as rows render and re-pins to the bottom when live messages arrive) and re-sweeps if any rows were missed. All rows flow through a `MessageOrderBuffer` that feeds the parser in strict `data-index` order — rows rendered out of order wait behind the gap instead of being lost. A spinner is shown in the overlay while this runs and is replaced by the resource tables once the counts are rebuilt.
+- **Contradiction tolerance**: chat messages are ground truth — if an observed trade/steal/monopoly is impossible in every tracked variant (e.g. some messages were still missed), the tracker force-applies the observation with clamping and warns, instead of eliminating every variant and crashing mid-prune.
 - **Intelligent Processing**: Pauses during setup, then reprocesses for accuracy
 - **Comprehensive Logging**: Detailed console output for debugging
+
+### 📼 **Game Message Logging**
+
+- **Automatic capture**: Every chat message is recorded (plain text + verbatim HTML, deduped by `data-index`) independently of the parser, so the log is complete even for messages the parser ignores
+- **Auto-saved per game**: Each game is persisted to `chrome.storage.local` under `catanGameLog:<gameId>` (the game id comes from the colonist URL hash) — no clicks needed, and logs survive refreshes, tab closes, and navigation
+- **One-click export**: The 💾 button in the overlay header downloads the current game as `catan-game-<gameId>-<timestamp>.json`
+- **Export everything**: From DevTools (select the extension's content-script context in the console dropdown), run `__catanCounter.exportAllGameLogs()` to download all stored games as a single JSON file
+- **Versioned schema** (`schemaVersion: 1`) with game metadata — game id, URL, players, which player captured the log (`youPlayerName`), timestamps — designed so logs collected from many users can later be pooled as training data for a Catan-playing bot
+
+Exported JSON shape:
+
+```json
+{
+  "schemaVersion": 1,
+  "gameId": "green9433",
+  "url": "https://colonist.io/#green9433",
+  "startedAt": "2026-08-17T20:29:09.000Z",
+  "updatedAt": "2026-08-17T21:02:41.000Z",
+  "youPlayerName": "Camilo#6469",
+  "players": ["Aaren", "Camilo#6469", "Botzow", "Mathe"],
+  "messages": [
+    {
+      "index": 2,
+      "text": "Aaren placed a Settlement",
+      "html": "<div data-index=\"2\" ...>",
+      "loggedAt": "..."
+    }
+  ]
+}
+```
 
 ### 🎯 **Supported Game Events**
 
@@ -57,6 +88,7 @@ A Chrome extension that automatically tracks game state for Settlers of Catan ga
 - **Probabilistic Resource Display**: Shows minimum guaranteed resources and probability of having additional resources (e.g., "2 +67%" means at least 2 guaranteed, 67% chance of more)
 - **Branch Elimination**: When players make offers or spend resources, impossible variants are automatically pruned
 - **Automatic Deduction**: Single-resource-type steals are instantly resolved without creating variants
+- **Unknown-Transaction Refinement**: after every message the tracker collapses the whole tree when every variant agrees on the current hands — historical steals that no longer affect anyone's cards (e.g. a card that made a round trip) retire from the Unknown Transactions list instead of lingering forever. Two additional _approximate_ refinements — culling outcome branches below 3% probability and auto-resolving steals once one outcome reaches ≥95% — are gated behind `trackerConfig.approximateRefinements` (`src/trackerConfig.ts`, off by default, so the tracker only ever states what provably follows from the chat)
 - **Hand-Count Resolution**: Reads each player's current resource-card count from colonist's player-information panel (`[data-player-information-container]`) and prunes any variant whose per-player totals don't match. This resolves uncertain steals that the chat alone cannot — most notably **after a monopoly**, where different variants disagree on how many cards a player kept, the known hand sizes pin the distribution and collapse the remaining ambiguity.
 
 ## Installation
@@ -283,6 +315,7 @@ The codebase is organized into focused modules for better maintainability:
 - **`domUtils.ts`** - DOM element querying, resource parsing, and utility functions
 - **`overlay.ts`** - Draggable game state overlay UI with probabilistic resource display
 - **`chatParser.ts`** - Core chat message parsing logic handling 24+ game scenarios
+- **`messageLogger.ts`** - Records raw chat messages per game, persists them to `chrome.storage.local`, and exports them as JSON
 - **`content.ts`** - Main entry point, initialization, and mutation observer setup
 
 All modules are bundled into a single `content.js` file using Rollup for optimal browser performance.

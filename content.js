@@ -501,6 +501,30 @@
             return mergedVariants.sort((a, b) => b.probability - a.probability);
         }
         /**
+         * Collapse the tree to a single node when every leaf agrees on the current
+         * game state.
+         *
+         * Variants can differ only in HISTORY while agreeing on the present — e.g.
+         * a stolen card that made a round trip leaves the same hands as one that
+         * never moved. Once the leaves converge, the remaining branches carry no
+         * information about anyone's current cards, and keeping them just clutters
+         * the unknown-transactions display and multiplies future branching. After
+         * collapsing, transactions whose chains were dropped resolve as unknowable.
+         *
+         * Returns true if the tree was collapsed.
+         */
+        collapseIfConverged() {
+            const leafNodes = this.getCurrentVariantNodes();
+            if (leafNodes.length <= 1)
+                return false;
+            const first = JSON.stringify(leafNodes[0].gameState);
+            if (!leafNodes.every(node => JSON.stringify(node.gameState) === first)) {
+                return false;
+            }
+            this.root = new VariantNode(null, 1.0, leafNodes[0].gameState);
+            return true;
+        }
+        /**
          * Get all leaf nodes (nodes with no children)
          */
         getCurrentVariantNodes(node = this.root, result = []) {
@@ -574,6 +598,19 @@
             const currentNodes = this.variantTree.getCurrentVariantNodes();
             const transactionId = `${stealerName}_${victimName}_${Date.now()}_${++this.transactionCounter}`;
             let shouldCreateTransaction = false;
+            // The chat is ground truth: a steal happened, so the victim had at least
+            // one card. If every variant says they had none, our tracking is wrong
+            // (e.g. messages were missed after a page refresh) — skip the steal rather
+            // than eliminating every variant (which would throw on root removal).
+            const victimHasResources = (node) => {
+                const victimState = node.gameState[victimName];
+                return (!!victimState &&
+                    RESOURCE_TYPES.some(resourceType => victimState.resources[resourceType] > 0));
+            };
+            if (!currentNodes.some(victimHasResources)) {
+                console.warn(`⚠️ ${stealerName} stole from ${victimName}, but ${victimName} has no resources in any variant — ignoring steal (messages may have been missed)`);
+                return;
+            }
             for (const node of currentNodes) {
                 const newVariants = [];
                 const gameState = node.gameState;
@@ -628,17 +665,27 @@
         }
         processMonopoly(playerName, resourceType, totalStolen) {
             const currentNodes = this.variantTree.getCurrentVariantNodes();
-            for (const node of currentNodes) {
-                const gameState = node.gameState;
-                // Calculate how many of this resource all OTHER players have
+            const monopolyMatches = (node) => {
+                // How many of this resource all OTHER players have in this variant
                 let actualTotal = 0;
-                for (const [name, playerState] of Object.entries(gameState)) {
+                for (const [name, playerState] of Object.entries(node.gameState)) {
                     if (name !== playerName) {
                         actualTotal += playerState.resources[resourceType];
                     }
                 }
+                return actualTotal === totalStolen;
+            };
+            // The chat is ground truth: if no variant matches the announced total, our
+            // tracking is wrong (e.g. messages were missed after a page refresh). Keep
+            // every variant rather than emptying the tree (which would throw on root
+            // removal); the update below force-applies the announced result anyway.
+            const anyMatch = currentNodes.some(monopolyMatches);
+            if (!anyMatch) {
+                console.warn(`⚠️ Monopoly by ${playerName} (${totalStolen} ${resourceType}) matches no variant — force-applying (messages may have been missed)`);
+            }
+            for (const node of currentNodes) {
                 // If this branch doesn't match the known total, eliminate it
-                if (actualTotal !== totalStolen) {
+                if (anyMatch && !monopolyMatches(node)) {
                     this.variantTree.removeVariantNode(node);
                 }
             }
@@ -660,32 +707,52 @@
         }
         processTrade(player1, player2, resourceChanges) {
             const currentNodes = this.variantTree.getCurrentVariantNodes();
+            const player1Gives = Object.fromEntries(Object.entries(resourceChanges)
+                .filter(([_, value]) => value < 0)
+                .map(([key, value]) => [key, -value]));
+            const player2Gives = Object.fromEntries(Object.entries(resourceChanges).filter(([_, value]) => value > 0));
+            const tradeIsValid = (node) => this.canAffordTrade(node.gameState[player1], player1Gives) &&
+                this.canAffordTrade(node.gameState[player2], player2Gives);
+            // The chat is ground truth: if the trade is impossible in EVERY variant,
+            // our tracking is wrong (e.g. messages were missed after a page refresh).
+            // Eliminating all variants would cascade into removing the tree's root and
+            // throw mid-prune, so instead keep every variant and force-apply the trade
+            // with clamping.
+            const anyValid = currentNodes.some(tradeIsValid);
+            if (!anyValid) {
+                console.warn(`⚠️ Trade between ${player1} and ${player2} is impossible in every variant — force-applying (messages may have been missed)`);
+            }
             for (const node of currentNodes) {
                 const gameState = node.gameState;
-                const player1Gives = Object.fromEntries(Object.entries(resourceChanges)
-                    .filter(([_, value]) => value < 0)
-                    .map(([key, value]) => [key, -value]));
-                const player2Gives = Object.fromEntries(Object.entries(resourceChanges).filter(([_, value]) => value > 0));
-                // Check if trade is valid in this variant
-                if (!this.canAffordTrade(gameState[player1], player1Gives) ||
-                    !this.canAffordTrade(gameState[player2], player2Gives)) {
+                if (anyValid && !tradeIsValid(node)) {
                     this.variantTree.removeVariantNode(node);
                     continue;
                 }
-                // Execute the trade
-                this.executeResourceTransfer(gameState[player1], player1Gives, -1);
-                this.executeResourceTransfer(gameState[player1], player2Gives, 1);
-                this.executeResourceTransfer(gameState[player2], player2Gives, -1);
-                this.executeResourceTransfer(gameState[player2], player1Gives, 1);
+                // Execute the trade (clamped so a force-applied trade can't go negative)
+                const clamp = !anyValid;
+                this.executeResourceTransfer(gameState[player1], player1Gives, -1, clamp);
+                this.executeResourceTransfer(gameState[player1], player2Gives, 1, clamp);
+                this.executeResourceTransfer(gameState[player2], player2Gives, -1, clamp);
+                this.executeResourceTransfer(gameState[player2], player1Gives, 1, clamp);
             }
             this.variantTree.pruneInvalidNodes();
         }
         processTradeOffer(playerName, offeredResources) {
             const currentNodes = this.variantTree.getCurrentVariantNodes();
+            const offerIsValid = (node) => {
+                const playerState = node.gameState[playerName];
+                return (!!playerState && this.canAffordTrade(playerState, offeredResources));
+            };
+            // The chat is ground truth: if the offer is impossible in EVERY variant,
+            // our tracking is wrong (e.g. messages were missed after a page refresh).
+            // Keep the tree intact rather than emptying it (which would throw on root
+            // removal); an offer moves no resources, so there is nothing to apply.
+            if (!currentNodes.some(offerIsValid)) {
+                console.warn(`⚠️ Trade offer by ${playerName} is impossible in every variant — ignoring (messages may have been missed)`);
+                return;
+            }
             for (const node of currentNodes) {
-                const gameState = node.gameState;
-                const playerState = gameState[playerName];
-                if (!playerState || !this.canAffordTrade(playerState, offeredResources)) {
+                if (!offerIsValid(node)) {
                     this.variantTree.removeVariantNode(node);
                 }
             }
@@ -757,10 +824,13 @@
         /**
          * Helper: Execute resource transfer (multiplier: 1 for gain, -1 for loss)
          */
-        executeResourceTransfer(playerState, resources, multiplier) {
+        executeResourceTransfer(playerState, resources, multiplier, clamp = false) {
             for (const [resourceType, amount] of Object.entries(resources)) {
                 if (amount) {
-                    playerState.resources[resourceType] += amount * multiplier;
+                    const updated = playerState.resources[resourceType] + amount * multiplier;
+                    playerState.resources[resourceType] = clamp
+                        ? Math.max(0, updated)
+                        : updated;
                 }
             }
         }
@@ -883,6 +953,60 @@
             }
             return result;
         }
+        /**
+         * Cull outcome branches whose probability has dropped below epsilon.
+         *
+         * Steal trees compound: a few unknown steals in a row leave outcome options
+         * like "wheat: 0.02" alive forever (sub-3% is far below any actionable odds), cluttering the display and multiplying
+         * the variant count (each surviving branch re-branches on every later
+         * steal). Dropping a sub-epsilon outcome accepts a tiny chance of being
+         * wrong in exchange for a much tighter tree — and if reality later
+         * contradicts the cull, the processors force-apply the observation instead
+         * of crashing, so the tracker self-heals.
+         *
+         * Never culls every outcome of a transaction: at least the most likely
+         * option always survives.
+         */
+        cullImprobableOutcomes(epsilon = 0.03) {
+            for (const transaction of this.getUnresolvedTransactions()) {
+                const probabilities = this.getTransactionResourceProbabilities(transaction.id);
+                if (!probabilities)
+                    continue;
+                const options = Object.entries(probabilities).filter(([, p]) => p > 0);
+                if (options.length <= 1)
+                    continue;
+                const toCull = options.filter(([, p]) => p < epsilon);
+                if (toCull.length === 0 || toCull.length === options.length)
+                    continue;
+                for (const [resource] of toCull) {
+                    for (const node of this.variantTree.getCurrentVariantNodes()) {
+                        if (this.findStolenResourceInChain(node, transaction.id) === resource) {
+                            this.variantTree.removeVariantNode(node);
+                        }
+                    }
+                }
+                this.variantTree.pruneInvalidNodes();
+            }
+        }
+        /**
+         * Auto-resolve transactions where one outcome has become dominant
+         * (>= threshold). A 96%-certain steal is more useful resolved than shown as
+         * an open question; the rare miss is self-healing (see
+         * cullImprobableOutcomes). Exact certainties (probability 1) are handled by
+         * resolveAllUnknownTransactions already.
+         */
+        autoResolveDominantOutcomes(threshold = 0.95) {
+            for (const transaction of this.getUnresolvedTransactions()) {
+                const probabilities = this.getTransactionResourceProbabilities(transaction.id);
+                if (!probabilities)
+                    continue;
+                const [bestResource, bestProbability] = Object.entries(probabilities).reduce((best, entry) => (entry[1] > best[1] ? entry : best));
+                if (bestProbability >= threshold) {
+                    console.log(`🎯 Auto-resolving ${transaction.thief} steal from ${transaction.victim} as ${bestResource} (${(bestProbability * 100).toFixed(0)}% likely)`);
+                    this.resolveUnknownTransaction(transaction.id, bestResource);
+                }
+            }
+        }
     }
 
     function updateResourceAmount(resources, resourceType, amount) {
@@ -981,6 +1105,21 @@
             }
         }
         /**
+         * Full refinement cycle for unknown transactions: resolve what's certain,
+         * cull vanishingly-unlikely outcome branches, auto-resolve dominant ones,
+         * then resolve again (culling can leave a transaction with one option).
+         */
+        refineUnknownTransactions() {
+            this.resolveAllUnknownTransactions();
+            // When every variant agrees on the current hands, remaining branches are
+            // purely historical (e.g. a card that made a round trip) — collapse them
+            // so stale steals stop showing as open questions.
+            if (this.variantTree.collapseIfConverged()) {
+                console.log('🧹 All variants converged on one game state — retiring historical unknowns');
+            }
+            this.resolveAllUnknownTransactions();
+        }
+        /**
          * Prune variants using known per-player hand sizes (read from colonist's
          * `[data-player-information-container]` panel). Any variant in which a player's
          * total resource cards doesn't match their known count is impossible and is
@@ -1012,7 +1151,7 @@
                 }
             }
             this.variantTree.pruneInvalidNodes();
-            this.resolveAllUnknownTransactions();
+            this.refineUnknownTransactions();
         }
         /**
          * Find the stolen resource for a specific transaction in a node's chain
@@ -1075,28 +1214,46 @@
                     console.warn(`Unknown transaction type: ${exhaustiveCheck.type}`);
             }
             // Auto-resolve any transactions that can now be determined
-            this.resolveAllUnknownTransactions();
+            this.refineUnknownTransactions();
         }
         /**
          * Process a known steal (we know exactly what resource was stolen)
          */
         processKnownSteal(stealerName, victimName, resourceType) {
             const currentNodes = this.variantTree.getCurrentVariantNodes();
+            const stealIsPossible = (node) => {
+                const victimState = node.gameState[victimName];
+                return (!!victimState &&
+                    !!node.gameState[stealerName] &&
+                    getResourceAmount(victimState.resources, resourceType) > 0);
+            };
+            // The chat is ground truth: the steal happened. If it's impossible in
+            // EVERY variant, our tracking is wrong (e.g. messages were missed after a
+            // page refresh) — force-apply it (clamped at zero) rather than eliminating
+            // every variant, which would throw on root removal.
+            const anyPossible = currentNodes.some(stealIsPossible);
+            if (!anyPossible) {
+                console.warn(`⚠️ ${stealerName} stole ${resourceType} from ${victimName}, but no variant allows it — force-applying (messages may have been missed)`);
+            }
             for (const node of currentNodes) {
                 const gameState = node.gameState;
-                // Check if victim has this resource in this variant
                 const victimState = gameState[victimName];
                 const stealerState = gameState[stealerName];
-                if (victimState &&
-                    stealerState &&
-                    getResourceAmount(victimState.resources, resourceType) > 0) {
+                if (stealIsPossible(node)) {
                     // Execute the steal
                     updateResourceAmount(victimState.resources, resourceType, -1);
                     updateResourceAmount(stealerState.resources, resourceType, 1);
                 }
-                else {
+                else if (anyPossible) {
                     // This variant is invalid - victim doesn't have the resource
                     this.variantTree.removeVariantNode(node);
+                }
+                else if (victimState && stealerState) {
+                    // Force-apply: victim can't go below zero
+                    if (getResourceAmount(victimState.resources, resourceType) > 0) {
+                        updateResourceAmount(victimState.resources, resourceType, -1);
+                    }
+                    updateResourceAmount(stealerState.resources, resourceType, 1);
                 }
             }
             this.variantTree.pruneInvalidNodes();
@@ -1498,6 +1655,168 @@
         });
     }
 
+    // messageLogger.ts
+    const STORAGE_KEY_PREFIX = 'catanGameLog:';
+    const PERSIST_DEBOUNCE_MS = 1000;
+    let currentLog = null;
+    const seenIndices = new Set();
+    let persistTimer = null;
+    function storageAvailable() {
+        var _a;
+        return typeof chrome !== 'undefined' && !!((_a = chrome === null || chrome === void 0 ? void 0 : chrome.storage) === null || _a === void 0 ? void 0 : _a.local);
+    }
+    function getGameIdFromUrl() {
+        const hash = window.location.hash.replace(/^#/, '');
+        return hash || 'unknown';
+    }
+    /**
+     * Start (or resume) logging for the game identified by the current URL. If a
+     * log for this game already exists in chrome.storage.local (e.g. after a page
+     * refresh), it is loaded and new messages are merged into it.
+     */
+    function initMessageLogger() {
+        return __awaiter(this, void 0, void 0, function* () {
+            const gameId = getGameIdFromUrl();
+            const now = new Date().toISOString();
+            currentLog = {
+                schemaVersion: 1,
+                gameId,
+                url: window.location.href,
+                startedAt: now,
+                updatedAt: now,
+                youPlayerName: null,
+                players: [],
+                messages: [],
+            };
+            seenIndices.clear();
+            if (!storageAvailable())
+                return;
+            try {
+                const key = STORAGE_KEY_PREFIX + gameId;
+                const stored = yield chrome.storage.local.get(key);
+                const existing = stored[key];
+                if (existing === null || existing === void 0 ? void 0 : existing.messages) {
+                    currentLog = Object.assign(Object.assign({}, existing), { updatedAt: now });
+                    for (const message of currentLog.messages) {
+                        seenIndices.add(message.index);
+                    }
+                    console.log(`📼 Resumed game log for "${gameId}" (${currentLog.messages.length} messages)`);
+                }
+            }
+            catch (error) {
+                console.warn('📼 Could not load stored game log:', error);
+            }
+        });
+    }
+    /**
+     * Record one chat row. Safe to call repeatedly with the same element (history
+     * replay re-renders overlapping windows) — rows are deduped by data-index.
+     */
+    function logChatMessage(element) {
+        var _a, _b;
+        if (!currentLog)
+            return;
+        const dataIndexAttr = element.getAttribute('data-index');
+        if (dataIndexAttr === null)
+            return;
+        const index = parseInt(dataIndexAttr, 10);
+        if (isNaN(index) || seenIndices.has(index))
+            return;
+        seenIndices.add(index);
+        currentLog.messages.push({
+            index,
+            text: (_b = (_a = element.textContent) === null || _a === void 0 ? void 0 : _a.trim()) !== null && _b !== void 0 ? _b : '',
+            html: element.outerHTML,
+            loggedAt: new Date().toISOString(),
+        });
+        schedulePersist();
+    }
+    /** Refresh the metadata snapshot from live game state and keep messages sorted. */
+    function snapshotMetadata(log) {
+        log.updatedAt = new Date().toISOString();
+        log.youPlayerName = game.youPlayerName;
+        log.players = game.players.map(p => p.name);
+        log.messages.sort((a, b) => a.index - b.index);
+    }
+    function schedulePersist() {
+        if (!storageAvailable())
+            return;
+        if (persistTimer !== null)
+            clearTimeout(persistTimer);
+        persistTimer = setTimeout(() => {
+            persistTimer = null;
+            void persistCurrentLog();
+        }, PERSIST_DEBOUNCE_MS);
+    }
+    function persistCurrentLog() {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!currentLog || !storageAvailable())
+                return;
+            snapshotMetadata(currentLog);
+            try {
+                yield chrome.storage.local.set({
+                    [STORAGE_KEY_PREFIX + currentLog.gameId]: currentLog,
+                });
+            }
+            catch (error) {
+                console.warn('📼 Could not persist game log:', error);
+            }
+        });
+    }
+    function downloadJson(data, filename) {
+        const blob = new Blob([JSON.stringify(data, null, 2)], {
+            type: 'application/json',
+        });
+        const objectUrl = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = objectUrl;
+        anchor.download = filename;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        URL.revokeObjectURL(objectUrl);
+    }
+    function timestampSlug() {
+        return new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    }
+    /**
+     * Download the current game's log as a JSON file (wired to the overlay's 💾
+     * button). Returns the exported log, or null when nothing has been captured.
+     */
+    function downloadCurrentGameLog() {
+        if (!currentLog || currentLog.messages.length === 0) {
+            console.warn('📼 No messages captured yet — nothing to download');
+            return null;
+        }
+        snapshotMetadata(currentLog);
+        downloadJson(currentLog, `catan-game-${currentLog.gameId}-${timestampSlug()}.json`);
+        return currentLog;
+    }
+    /**
+     * Download every game log stored by this extension as one JSON file. Run from
+     * the extension's content-script console context:
+     *   __catanCounter.exportAllGameLogs()
+     */
+    function exportAllGameLogs() {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!storageAvailable()) {
+                console.warn('📼 chrome.storage is not available');
+                return [];
+            }
+            const all = yield chrome.storage.local.get(null);
+            const logs = Object.entries(all)
+                .filter(([key]) => key.startsWith(STORAGE_KEY_PREFIX))
+                .map(([, value]) => value)
+                .sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+            if (logs.length === 0) {
+                console.warn('📼 No stored game logs found');
+                return [];
+            }
+            downloadJson(logs, `catan-games-all-${timestampSlug()}.json`);
+            return logs;
+        });
+    }
+
     // =============================================================================
     // UTILITY FUNCTIONS
     // =============================================================================
@@ -1691,7 +2010,9 @@
         }
         // Only allow dragging from the header
         const header = gameStateOverlay.querySelector('#overlay-header');
-        if (!(header === null || header === void 0 ? void 0 : header.contains(target)) || target.id === 'minimize-btn')
+        if (!(header === null || header === void 0 ? void 0 : header.contains(target)) ||
+            target.id === 'minimize-btn' ||
+            target.id === 'save-log-btn')
             return;
         isDragging = true;
         const rect = gameStateOverlay.getBoundingClientRect();
@@ -2108,15 +2429,26 @@
       user-select: none;
     ">
       <div style="font-weight: bold;">🎲 Catan Counter</div>
-      <button id="minimize-btn" style="
-        background: none; 
-        border: none; 
-        color: white; 
-        cursor: pointer; 
-        font-size: 16px; 
-        padding: 2px 6px;
-        border-radius: 3px;
-      " title="${isMinimized ? 'Expand' : 'Minimize'}">${isMinimized ? '□' : '−'}</button>
+      <div style="display: flex; align-items: center; gap: 2px;">
+        <button id="save-log-btn" style="
+          background: none;
+          border: none;
+          color: white;
+          cursor: pointer;
+          font-size: 14px;
+          padding: 2px 6px;
+          border-radius: 3px;
+        " title="Download this game's chat log as JSON">💾</button>
+        <button id="minimize-btn" style="
+          background: none;
+          border: none;
+          color: white;
+          cursor: pointer;
+          font-size: 16px;
+          padding: 2px 6px;
+          border-radius: 3px;
+        " title="${isMinimized ? 'Expand' : 'Minimize'}">${isMinimized ? '□' : '−'}</button>
+      </div>
     </div>
     
     <div id="overlay-content" style="display: ${contentDisplay}; padding: 15px; max-height: 800px; overflow-y: auto; position: relative;">
@@ -2139,6 +2471,14 @@
             minimizeBtn.addEventListener('click', e => {
                 e.stopPropagation(); // Prevent dragging when clicking minimize
                 toggleMinimize();
+            });
+        }
+        // Add save-log button functionality
+        const saveLogBtn = overlay.querySelector('#save-log-btn');
+        if (saveLogBtn) {
+            saveLogBtn.addEventListener('click', e => {
+                e.stopPropagation(); // Prevent dragging when clicking save
+                downloadCurrentGameLog();
             });
         }
         // Add event listeners for transaction items
@@ -2743,7 +3083,7 @@
         }
     }
     function updateGameFromChat(element) {
-        var _a;
+        var _a, _b;
         // If we're waiting for "you" player selection, don't process new messages
         if (isWaitingForYouPlayerSelection)
             return;
@@ -2753,17 +3093,13 @@
         if (checkDuplicateElement(element))
             return;
         let playerName = getPlayerName(element);
-        // getting correct player name when it says "You stole"
+        // "You stole X from Y" names the victim but not the thief, and the thief is
+        // always the current player. This previously read the name off the previous
+        // chat row, assuming it was that player's "moved Robber" message — but any
+        // message can land in between (another player building, buying a dev card),
+        // in which case the steal was credited to the wrong player entirely.
         if (messageText.includes('You stole') && messageText.includes('from')) {
-            // Get the previous sibling element to find the actual player name
-            const previousElement = element.previousElementSibling;
-            if (previousElement) {
-                const actualPlayerName = getPlayerName(previousElement);
-                if (actualPlayerName) {
-                    // Override the playerName with the actual player from previous element
-                    playerName = actualPlayerName;
-                }
-            }
+            playerName = (_b = game.youPlayerName) !== null && _b !== void 0 ? _b : playerName;
         }
         // Scenario 0: Handle "[Player] stole [resource] from you" scenario
         if (messageText.includes('stole') && messageText.includes('from you')) {
@@ -2930,19 +3266,127 @@
         updateGameStateDisplay();
     }
 
+    // messageOrderBuffer.ts
+    // Guarantees chat rows are handed to the parser in strict data-index order.
+    //
+    // The parser's dedup (game.chatsProcessed) is a monotonic high-water mark, so
+    // processing row 244 before rows 68–243 locks the earlier rows out FOREVER —
+    // this is why dice/resource stats never caught up after a reconnect, where
+    // colonist's virtual scroller can render the bottom of the chat before the
+    // history sweep has covered the middle. This buffer captures rows in whatever
+    // order they render and only feeds the parser the contiguous prefix; rows
+    // after a gap wait until the gap fills (or until flush() gives up on it).
+    //
+    // Rows are captured as deep clones: virtual scrollers recycle DOM nodes, so a
+    // held reference may be rewritten to show a different message by the time the
+    // gap before it fills.
+    class MessageOrderBuffer {
+        constructor(processRow) {
+            this.processRow = processRow;
+            this.pending = new Map();
+            this.lastProcessed = -1;
+        }
+        /**
+         * Buffer one rendered chat row. Safe to call repeatedly with the same row
+         * (dedups by data-index); rows at or below the high-water mark are ignored.
+         */
+        capture(element) {
+            const dataIndexAttr = element.getAttribute('data-index');
+            if (dataIndexAttr === null)
+                return;
+            const index = parseInt(dataIndexAttr, 10);
+            if (isNaN(index) || index <= this.lastProcessed || this.pending.has(index))
+                return;
+            this.pending.set(index, element.cloneNode(true));
+        }
+        /**
+         * Process the contiguous run of buffered rows starting right after the last
+         * processed index. Stops at the first gap. Returns how many were processed.
+         */
+        drain() {
+            let count = 0;
+            while (this.pending.has(this.lastProcessed + 1)) {
+                const element = this.pending.get(this.lastProcessed + 1);
+                this.pending.delete(this.lastProcessed + 1);
+                this.lastProcessed++;
+                this.processRow(element);
+                count++;
+            }
+            return count;
+        }
+        /**
+         * Process everything still buffered in ascending order, accepting gaps.
+         * Call once history loading has done its best — rows lost to a gap can't be
+         * recovered, but everything captured after the gap still counts.
+         */
+        flush() {
+            const indices = Array.from(this.pending.keys()).sort((a, b) => a - b);
+            for (const index of indices) {
+                const element = this.pending.get(index);
+                this.pending.delete(index);
+                this.lastProcessed = Math.max(this.lastProcessed, index);
+                this.processRow(element);
+            }
+            return indices.length;
+        }
+        /** True when captured rows are stuck behind a gap (drain can't reach them). */
+        hasPending() {
+            return this.pending.size > 0;
+        }
+    }
+
     // content.ts
+    // All chat rows flow through this buffer so the parser always sees them in
+    // strict data-index order — the parser's dedup is a monotonic high-water mark,
+    // so an out-of-order row would permanently lock out everything before it.
+    const messageBuffer = new MessageOrderBuffer(updateGameFromChat);
+    let blockedFlushTimer = null;
+    /**
+     * Capture one rendered chat row: log it verbatim (the logger dedups by index
+     * itself) and queue it for in-order parsing.
+     */
+    function captureRow(element) {
+        logChatMessage(element);
+        messageBuffer.capture(element);
+    }
+    /**
+     * If rows are stuck behind a gap the scroller never rendered, give the gap a
+     * few seconds to fill (a re-render or user scroll may still supply it), then
+     * process what we have anyway so live tracking doesn't stall forever.
+     */
+    function scheduleBlockedFlush() {
+        if (!messageBuffer.hasPending()) {
+            if (blockedFlushTimer !== null) {
+                clearTimeout(blockedFlushTimer);
+                blockedFlushTimer = null;
+            }
+            return;
+        }
+        if (blockedFlushTimer !== null)
+            return;
+        blockedFlushTimer = window.setTimeout(() => {
+            blockedFlushTimer = null;
+            messageBuffer.drain();
+            if (messageBuffer.hasPending()) {
+                console.warn('⚠️ Chat gap never rendered — processing buffered rows out of contiguity');
+                messageBuffer.flush();
+            }
+            updateGameStateDisplay();
+        }, 3000);
+    }
     const chatMutationCallback = (mutationsList) => {
-        let processedAny = false;
+        let sawRows = false;
         for (const mutation of mutationsList) {
             mutation.addedNodes.forEach(addedNode => {
                 if (addedNode.nodeType === Node.ELEMENT_NODE) {
-                    const element = addedNode;
-                    updateGameFromChat(element);
-                    processedAny = true;
+                    captureRow(addedNode);
+                    sawRows = true;
                 }
             });
         }
-        if (processedAny) {
+        if (sawRows) {
+            messageBuffer.drain();
+            scheduleBlockedFlush();
             // Wait for colonist's player-information panel to reflect this message, then
             // refine the variant tree by the live hand counts. Deferring a frame avoids
             // reading stale counts (and pruneByHandCounts no-ops if they don't help).
@@ -2952,27 +3396,28 @@
             });
         }
     };
-    /**
-     * Process all currently-rendered message rows, sorted by data-index ascending so
-     * resources are applied in chronological order. Already-processed rows are
-     * skipped by the parser's data-index dedup, so calling this repeatedly is safe.
-     */
-    function processRenderedMessages(chatContainer) {
-        const rows = Array.from(chatContainer.querySelectorAll('[data-index]')).sort((a, b) => Number(a.getAttribute('data-index')) -
-            Number(b.getAttribute('data-index')));
-        for (const row of rows) {
-            updateGameFromChat(row);
-        }
+    /** Capture all currently-rendered rows and parse the contiguous prefix. */
+    function captureRenderedMessages(chatContainer) {
+        chatContainer
+            .querySelectorAll('[data-index]')
+            .forEach(row => captureRow(row));
+        messageBuffer.drain();
     }
     /**
      * Rebuild full game history after a page load/refresh.
      *
      * Colonist renders the chat as a virtual scroller that only keeps ~15 message
      * rows in the DOM at once, so on refresh the extension would otherwise see only
-     * the most recent messages and miscount. We scroll the chat container from top to
-     * bottom; each scroll step renders a fresh window of rows which we process in
-     * ascending data-index order. Going top→bottom means indices are encountered in
-     * chronological order, so the data-index dedup applies each message exactly once.
+     * the most recent messages and miscount. We scroll from top to bottom capturing
+     * each rendered window; the MessageOrderBuffer feeds the parser in data-index
+     * order regardless of render order.
+     *
+     * The sweep reads scrollTop/scrollHeight live on every step — the scroller
+     * corrects its estimated height as rows render, and re-pins to the bottom when
+     * a live message arrives mid-sweep, so a precomputed position would jump over
+     * whole stretches of the log (seen in practice as rows 68–243 never rendering).
+     * If a sweep ends with rows still stuck behind a gap, it re-sweeps up to two
+     * more times, then flushes whatever was captured.
      */
     function loadChatHistory(chatContainer) {
         return __awaiter(this, void 0, void 0, function* () {
@@ -2982,26 +3427,34 @@
             const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
             // Not virtualized (or everything already fits): just process what's rendered.
             if (!scrollEl || scrollEl.scrollHeight <= scrollEl.clientHeight + 5) {
-                processRenderedMessages(chatContainer);
+                captureRenderedMessages(chatContainer);
+                messageBuffer.flush();
                 return;
             }
-            const maxScroll = () => scrollEl.scrollHeight - scrollEl.clientHeight;
-            // Step by ~half a viewport so consecutive windows overlap (no skipped rows).
-            const step = Math.max(50, Math.floor(scrollEl.clientHeight * 0.5));
-            scrollEl.scrollTop = 0;
-            yield sleep(120); // let the scroller render the top of the log
-            let pos = 0;
-            let guard = 0;
-            while (guard++ < 1000) {
-                processRenderedMessages(chatContainer);
-                if (pos >= maxScroll())
-                    break;
-                pos = Math.min(pos + step, maxScroll());
-                scrollEl.scrollTop = pos;
-                yield sleep(90); // wait for the next window of rows to render
+            const MAX_SWEEPS = 3;
+            for (let sweep = 1; sweep <= MAX_SWEEPS; sweep++) {
+                scrollEl.scrollTop = 0;
+                yield sleep(120); // let the scroller render the top of the log
+                let guard = 0;
+                while (guard++ < 1000) {
+                    captureRenderedMessages(chatContainer);
+                    const maxScroll = scrollEl.scrollHeight - scrollEl.clientHeight;
+                    if (scrollEl.scrollTop >= maxScroll - 2)
+                        break;
+                    // Step by ~half a viewport so consecutive windows overlap (no skipped
+                    // rows), advancing from wherever the scroller ACTUALLY is right now.
+                    const step = Math.max(50, Math.floor(scrollEl.clientHeight * 0.5));
+                    scrollEl.scrollTop = Math.min(scrollEl.scrollTop + step, maxScroll);
+                    yield sleep(90); // wait for the next window of rows to render
+                }
+                // Final pass at the bottom in case the last window rendered after the loop.
+                captureRenderedMessages(chatContainer);
+                if (!messageBuffer.hasPending())
+                    return; // no gaps — history is complete
+                console.warn(`⚠️ History sweep ${sweep}/${MAX_SWEEPS} left a gap in the chat log, ${sweep < MAX_SWEEPS ? 'retrying...' : 'giving up on the gap'}`);
             }
-            // Final pass at the bottom in case the last window rendered after the loop.
-            processRenderedMessages(chatContainer);
+            // Gap rows never rendered; process everything captured after the gap anyway.
+            messageBuffer.flush();
         });
     }
     function tryFindChat() {
@@ -3011,6 +3464,10 @@
             // Stop polling now that we've located the chat.
             clearInterval(intervalId);
             autoDetectCurrentPlayer();
+            // Start recording chat messages for this game (resumes any stored log for
+            // the same game id, e.g. after a refresh). History replay below will feed
+            // every message through the logger via captureRow.
+            void initMessageLogger();
             // Show the game state overlay
             showGameStateOverlay();
             // Scroll through and process the full chat history (handles page refresh,
@@ -3021,6 +3478,10 @@
             loadChatHistory(chatContainer)
                 .then(() => {
                 console.log('✅ Finished processing chat history');
+                // The replay just caught up to the present, so the live hand counts in
+                // colonist's player panel are valid evidence against the rebuilt tree
+                // (this is what resolves post-monopoly ambiguity after a refresh).
+                applyHandCountResolution();
             })
                 .finally(() => {
                 // Calculations done: drop the loader and show the rebuilt counts.
@@ -3033,6 +3494,12 @@
             console.log('⏳ Chat container not found, retrying...');
         }
     }
+    // Console access to the stored game logs. From the page's DevTools console,
+    // select the extension's content-script context, then run:
+    //   __catanCounter.exportAllGameLogs()
+    window.__catanCounter = {
+        exportAllGameLogs,
+    };
     // Start polling every 2 seconds
     const intervalId = window.setInterval(tryFindChat, 2000);
     // Optionally run immediately
