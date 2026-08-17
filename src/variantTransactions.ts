@@ -17,6 +17,26 @@ export class VariantTransactionProcessor {
     const transactionId = `${stealerName}_${victimName}_${Date.now()}_${++this.transactionCounter}`;
     let shouldCreateTransaction = false;
 
+    // The chat is ground truth: a steal happened, so the victim had at least
+    // one card. If every variant says they had none, our tracking is wrong
+    // (e.g. messages were missed after a page refresh) — skip the steal rather
+    // than eliminating every variant (which would throw on root removal).
+    const victimHasResources = (node: VariantNode): boolean => {
+      const victimState = node.gameState[victimName];
+      return (
+        !!victimState &&
+        RESOURCE_TYPES.some(
+          resourceType => victimState.resources[resourceType] > 0
+        )
+      );
+    };
+    if (!currentNodes.some(victimHasResources)) {
+      console.warn(
+        `⚠️ ${stealerName} stole from ${victimName}, but ${victimName} has no resources in any variant — ignoring steal (messages may have been missed)`
+      );
+      return;
+    }
+
     for (const node of currentNodes) {
       const newVariants: VariantNode[] = [];
       const gameState = node.gameState;
@@ -100,19 +120,31 @@ export class VariantTransactionProcessor {
   ): void {
     const currentNodes = this.variantTree.getCurrentVariantNodes();
 
-    for (const node of currentNodes) {
-      const gameState = node.gameState;
-
-      // Calculate how many of this resource all OTHER players have
+    const monopolyMatches = (node: VariantNode): boolean => {
+      // How many of this resource all OTHER players have in this variant
       let actualTotal = 0;
-      for (const [name, playerState] of Object.entries(gameState)) {
+      for (const [name, playerState] of Object.entries(node.gameState)) {
         if (name !== playerName) {
           actualTotal += playerState.resources[resourceType];
         }
       }
+      return actualTotal === totalStolen;
+    };
 
+    // The chat is ground truth: if no variant matches the announced total, our
+    // tracking is wrong (e.g. messages were missed after a page refresh). Keep
+    // every variant rather than emptying the tree (which would throw on root
+    // removal); the update below force-applies the announced result anyway.
+    const anyMatch = currentNodes.some(monopolyMatches);
+    if (!anyMatch) {
+      console.warn(
+        `⚠️ Monopoly by ${playerName} (${totalStolen} ${resourceType}) matches no variant — force-applying (messages may have been missed)`
+      );
+    }
+
+    for (const node of currentNodes) {
       // If this branch doesn't match the known total, eliminate it
-      if (actualTotal !== totalStolen) {
+      if (anyMatch && !monopolyMatches(node)) {
         this.variantTree.removeVariantNode(node);
       }
     }
@@ -142,32 +174,45 @@ export class VariantTransactionProcessor {
     resourceChanges: Partial<ResourceObjectType>
   ): void {
     const currentNodes = this.variantTree.getCurrentVariantNodes();
+    const player1Gives = Object.fromEntries(
+      Object.entries(resourceChanges)
+        .filter(([_, value]) => value < 0)
+        .map(([key, value]) => [key, -value])
+    );
+    const player2Gives = Object.fromEntries(
+      Object.entries(resourceChanges).filter(([_, value]) => value > 0)
+    );
+
+    const tradeIsValid = (node: VariantNode): boolean =>
+      this.canAffordTrade(node.gameState[player1], player1Gives) &&
+      this.canAffordTrade(node.gameState[player2], player2Gives);
+
+    // The chat is ground truth: if the trade is impossible in EVERY variant,
+    // our tracking is wrong (e.g. messages were missed after a page refresh).
+    // Eliminating all variants would cascade into removing the tree's root and
+    // throw mid-prune, so instead keep every variant and force-apply the trade
+    // with clamping.
+    const anyValid = currentNodes.some(tradeIsValid);
+    if (!anyValid) {
+      console.warn(
+        `⚠️ Trade between ${player1} and ${player2} is impossible in every variant — force-applying (messages may have been missed)`
+      );
+    }
 
     for (const node of currentNodes) {
       const gameState = node.gameState;
-      const player1Gives = Object.fromEntries(
-        Object.entries(resourceChanges)
-          .filter(([_, value]) => value < 0)
-          .map(([key, value]) => [key, -value])
-      );
-      const player2Gives = Object.fromEntries(
-        Object.entries(resourceChanges).filter(([_, value]) => value > 0)
-      );
 
-      // Check if trade is valid in this variant
-      if (
-        !this.canAffordTrade(gameState[player1], player1Gives) ||
-        !this.canAffordTrade(gameState[player2], player2Gives)
-      ) {
+      if (anyValid && !tradeIsValid(node)) {
         this.variantTree.removeVariantNode(node);
         continue;
       }
 
-      // Execute the trade
-      this.executeResourceTransfer(gameState[player1], player1Gives, -1);
-      this.executeResourceTransfer(gameState[player1], player2Gives, 1);
-      this.executeResourceTransfer(gameState[player2], player2Gives, -1);
-      this.executeResourceTransfer(gameState[player2], player1Gives, 1);
+      // Execute the trade (clamped so a force-applied trade can't go negative)
+      const clamp = !anyValid;
+      this.executeResourceTransfer(gameState[player1], player1Gives, -1, clamp);
+      this.executeResourceTransfer(gameState[player1], player2Gives, 1, clamp);
+      this.executeResourceTransfer(gameState[player2], player2Gives, -1, clamp);
+      this.executeResourceTransfer(gameState[player2], player1Gives, 1, clamp);
     }
 
     this.variantTree.pruneInvalidNodes();
@@ -179,11 +224,26 @@ export class VariantTransactionProcessor {
   ): void {
     const currentNodes = this.variantTree.getCurrentVariantNodes();
 
-    for (const node of currentNodes) {
-      const gameState = node.gameState;
-      const playerState = gameState[playerName];
+    const offerIsValid = (node: VariantNode): boolean => {
+      const playerState = node.gameState[playerName];
+      return (
+        !!playerState && this.canAffordTrade(playerState, offeredResources)
+      );
+    };
 
-      if (!playerState || !this.canAffordTrade(playerState, offeredResources)) {
+    // The chat is ground truth: if the offer is impossible in EVERY variant,
+    // our tracking is wrong (e.g. messages were missed after a page refresh).
+    // Keep the tree intact rather than emptying it (which would throw on root
+    // removal); an offer moves no resources, so there is nothing to apply.
+    if (!currentNodes.some(offerIsValid)) {
+      console.warn(
+        `⚠️ Trade offer by ${playerName} is impossible in every variant — ignoring (messages may have been missed)`
+      );
+      return;
+    }
+
+    for (const node of currentNodes) {
+      if (!offerIsValid(node)) {
         this.variantTree.removeVariantNode(node);
       }
     }
@@ -286,11 +346,16 @@ export class VariantTransactionProcessor {
   private executeResourceTransfer(
     playerState: any,
     resources: Partial<ResourceObjectType>,
-    multiplier: number
+    multiplier: number,
+    clamp = false
   ): void {
     for (const [resourceType, amount] of Object.entries(resources)) {
       if (amount) {
-        playerState.resources[resourceType] += amount * multiplier;
+        const updated =
+          playerState.resources[resourceType] + amount * multiplier;
+        playerState.resources[resourceType] = clamp
+          ? Math.max(0, updated)
+          : updated;
       }
     }
   }
@@ -457,5 +522,74 @@ export class VariantTransactionProcessor {
     }
 
     return result;
+  }
+
+  /**
+   * Cull outcome branches whose probability has dropped below epsilon.
+   *
+   * Steal trees compound: a few unknown steals in a row leave outcome options
+   * like "wheat: 0.02" alive forever (sub-3% is far below any actionable odds), cluttering the display and multiplying
+   * the variant count (each surviving branch re-branches on every later
+   * steal). Dropping a sub-epsilon outcome accepts a tiny chance of being
+   * wrong in exchange for a much tighter tree — and if reality later
+   * contradicts the cull, the processors force-apply the observation instead
+   * of crashing, so the tracker self-heals.
+   *
+   * Never culls every outcome of a transaction: at least the most likely
+   * option always survives.
+   */
+  cullImprobableOutcomes(epsilon = 0.03): void {
+    for (const transaction of this.getUnresolvedTransactions()) {
+      const probabilities = this.getTransactionResourceProbabilities(
+        transaction.id
+      );
+      if (!probabilities) continue;
+
+      const options = Object.entries(probabilities).filter(([, p]) => p > 0);
+      if (options.length <= 1) continue;
+      const toCull = options.filter(([, p]) => p < epsilon);
+      if (toCull.length === 0 || toCull.length === options.length) continue;
+
+      for (const [resource] of toCull) {
+        for (const node of this.variantTree.getCurrentVariantNodes()) {
+          if (
+            this.findStolenResourceInChain(node, transaction.id) === resource
+          ) {
+            this.variantTree.removeVariantNode(node);
+          }
+        }
+      }
+      this.variantTree.pruneInvalidNodes();
+    }
+  }
+
+  /**
+   * Auto-resolve transactions where one outcome has become dominant
+   * (>= threshold). A 96%-certain steal is more useful resolved than shown as
+   * an open question; the rare miss is self-healing (see
+   * cullImprobableOutcomes). Exact certainties (probability 1) are handled by
+   * resolveAllUnknownTransactions already.
+   */
+  autoResolveDominantOutcomes(threshold = 0.95): void {
+    for (const transaction of this.getUnresolvedTransactions()) {
+      const probabilities = this.getTransactionResourceProbabilities(
+        transaction.id
+      );
+      if (!probabilities) continue;
+
+      const [bestResource, bestProbability] = Object.entries(
+        probabilities
+      ).reduce((best, entry) => (entry[1] > best[1] ? entry : best));
+
+      if (bestProbability >= threshold) {
+        console.log(
+          `🎯 Auto-resolving ${transaction.thief} steal from ${transaction.victim} as ${bestResource} (${(bestProbability * 100).toFixed(0)}% likely)`
+        );
+        this.resolveUnknownTransaction(
+          transaction.id,
+          bestResource as keyof ResourceObjectType
+        );
+      }
+    }
   }
 }

@@ -194,6 +194,32 @@ export class VariantTree {
   }
 
   /**
+   * Collapse the tree to a single node when every leaf agrees on the current
+   * game state.
+   *
+   * Variants can differ only in HISTORY while agreeing on the present — e.g.
+   * a stolen card that made a round trip leaves the same hands as one that
+   * never moved. Once the leaves converge, the remaining branches carry no
+   * information about anyone's current cards, and keeping them just clutters
+   * the unknown-transactions display and multiplies future branching. After
+   * collapsing, transactions whose chains were dropped resolve as unknowable.
+   *
+   * Returns true if the tree was collapsed.
+   */
+  collapseIfConverged(): boolean {
+    const leafNodes = this.getCurrentVariantNodes();
+    if (leafNodes.length <= 1) return false;
+
+    const first = JSON.stringify(leafNodes[0].gameState);
+    if (!leafNodes.every(node => JSON.stringify(node.gameState) === first)) {
+      return false;
+    }
+
+    this.root = new VariantNode(null, 1.0, leafNodes[0].gameState);
+    return true;
+  }
+
+  /**
    * Get all leaf nodes (nodes with no children)
    */
   getCurrentVariantNodes(

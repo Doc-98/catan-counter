@@ -1,4 +1,5 @@
 import { game, setYouPlayer, markYouPlayerAsked } from './gameState.js';
+import { downloadCurrentGameLog } from './messageLogger.js';
 import { ResourceObjectType } from './types.js';
 
 // Chrome extension API type declaration
@@ -254,7 +255,12 @@ function startDrag(e: MouseEvent): void {
 
   // Only allow dragging from the header
   const header = gameStateOverlay.querySelector('#overlay-header');
-  if (!header?.contains(target) || target.id === 'minimize-btn') return;
+  if (
+    !header?.contains(target) ||
+    target.id === 'minimize-btn' ||
+    target.id === 'save-log-btn'
+  )
+    return;
 
   isDragging = true;
   const rect = gameStateOverlay.getBoundingClientRect();
@@ -788,15 +794,26 @@ function updateOverlayContent(overlay: HTMLDivElement): void {
       user-select: none;
     ">
       <div style="font-weight: bold;">🎲 Catan Counter</div>
-      <button id="minimize-btn" style="
-        background: none; 
-        border: none; 
-        color: white; 
-        cursor: pointer; 
-        font-size: 16px; 
-        padding: 2px 6px;
-        border-radius: 3px;
-      " title="${isMinimized ? 'Expand' : 'Minimize'}">${isMinimized ? '□' : '−'}</button>
+      <div style="display: flex; align-items: center; gap: 2px;">
+        <button id="save-log-btn" style="
+          background: none;
+          border: none;
+          color: white;
+          cursor: pointer;
+          font-size: 14px;
+          padding: 2px 6px;
+          border-radius: 3px;
+        " title="Download this game's chat log as JSON">💾</button>
+        <button id="minimize-btn" style="
+          background: none;
+          border: none;
+          color: white;
+          cursor: pointer;
+          font-size: 16px;
+          padding: 2px 6px;
+          border-radius: 3px;
+        " title="${isMinimized ? 'Expand' : 'Minimize'}">${isMinimized ? '□' : '−'}</button>
+      </div>
     </div>
     
     <div id="overlay-content" style="display: ${contentDisplay}; padding: 15px; max-height: 800px; overflow-y: auto; position: relative;">
@@ -822,6 +839,17 @@ function updateOverlayContent(overlay: HTMLDivElement): void {
     minimizeBtn.addEventListener('click', e => {
       e.stopPropagation(); // Prevent dragging when clicking minimize
       toggleMinimize();
+    });
+  }
+
+  // Add save-log button functionality
+  const saveLogBtn = overlay.querySelector(
+    '#save-log-btn'
+  ) as HTMLButtonElement;
+  if (saveLogBtn) {
+    saveLogBtn.addEventListener('click', e => {
+      e.stopPropagation(); // Prevent dragging when clicking save
+      downloadCurrentGameLog();
     });
   }
 

@@ -6,6 +6,7 @@ import {
   RESOURCE_TYPES,
 } from './variants';
 import { VariantTransactionProcessor } from './variantTransactions';
+import { trackerConfig } from './trackerConfig';
 import {
   ResourceObjectType,
   TransactionType,
@@ -160,6 +161,28 @@ export class PropbableGameState {
   }
 
   /**
+   * Full refinement cycle for unknown transactions: resolve what's certain,
+   * cull vanishingly-unlikely outcome branches, auto-resolve dominant ones,
+   * then resolve again (culling can leave a transaction with one option).
+   */
+  private refineUnknownTransactions(): void {
+    this.resolveAllUnknownTransactions();
+    if (trackerConfig.approximateRefinements) {
+      this.transactionProcessor.cullImprobableOutcomes();
+      this.transactionProcessor.autoResolveDominantOutcomes();
+    }
+    // When every variant agrees on the current hands, remaining branches are
+    // purely historical (e.g. a card that made a round trip) — collapse them
+    // so stale steals stop showing as open questions.
+    if (this.variantTree.collapseIfConverged()) {
+      console.log(
+        '🧹 All variants converged on one game state — retiring historical unknowns'
+      );
+    }
+    this.resolveAllUnknownTransactions();
+  }
+
+  /**
    * Prune variants using known per-player hand sizes (read from colonist's
    * `[data-player-information-container]` panel). Any variant in which a player's
    * total resource cards doesn't match their known count is impossible and is
@@ -197,7 +220,7 @@ export class PropbableGameState {
     }
 
     this.variantTree.pruneInvalidNodes();
-    this.resolveAllUnknownTransactions();
+    this.refineUnknownTransactions();
   }
 
   /**
@@ -298,7 +321,7 @@ export class PropbableGameState {
     }
 
     // Auto-resolve any transactions that can now be determined
-    this.resolveAllUnknownTransactions();
+    this.refineUnknownTransactions();
   }
 
   /**
@@ -311,24 +334,44 @@ export class PropbableGameState {
   ): void {
     const currentNodes = this.variantTree.getCurrentVariantNodes();
 
+    const stealIsPossible = (node: VariantNode): boolean => {
+      const victimState = node.gameState[victimName];
+      return (
+        !!victimState &&
+        !!node.gameState[stealerName] &&
+        getResourceAmount(victimState.resources, resourceType) > 0
+      );
+    };
+
+    // The chat is ground truth: the steal happened. If it's impossible in
+    // EVERY variant, our tracking is wrong (e.g. messages were missed after a
+    // page refresh) — force-apply it (clamped at zero) rather than eliminating
+    // every variant, which would throw on root removal.
+    const anyPossible = currentNodes.some(stealIsPossible);
+    if (!anyPossible) {
+      console.warn(
+        `⚠️ ${stealerName} stole ${resourceType} from ${victimName}, but no variant allows it — force-applying (messages may have been missed)`
+      );
+    }
+
     for (const node of currentNodes) {
       const gameState = node.gameState;
-
-      // Check if victim has this resource in this variant
       const victimState = gameState[victimName];
       const stealerState = gameState[stealerName];
 
-      if (
-        victimState &&
-        stealerState &&
-        getResourceAmount(victimState.resources, resourceType) > 0
-      ) {
+      if (stealIsPossible(node)) {
         // Execute the steal
-        updateResourceAmount(victimState.resources, resourceType, -1);
-        updateResourceAmount(stealerState.resources, resourceType, 1);
-      } else {
+        updateResourceAmount(victimState!.resources, resourceType, -1);
+        updateResourceAmount(stealerState!.resources, resourceType, 1);
+      } else if (anyPossible) {
         // This variant is invalid - victim doesn't have the resource
         this.variantTree.removeVariantNode(node);
+      } else if (victimState && stealerState) {
+        // Force-apply: victim can't go below zero
+        if (getResourceAmount(victimState.resources, resourceType) > 0) {
+          updateResourceAmount(victimState.resources, resourceType, -1);
+        }
+        updateResourceAmount(stealerState.resources, resourceType, 1);
       }
     }
 

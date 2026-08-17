@@ -10,20 +10,69 @@ import {
   updateGameStateDisplay,
 } from './overlay.js';
 import { resetGameState, autoDetectCurrentPlayer } from './gameState.js';
+import {
+  initMessageLogger,
+  logChatMessage,
+  exportAllGameLogs,
+} from './messageLogger.js';
+import { MessageOrderBuffer } from './messageOrderBuffer.js';
+
+// All chat rows flow through this buffer so the parser always sees them in
+// strict data-index order — the parser's dedup is a monotonic high-water mark,
+// so an out-of-order row would permanently lock out everything before it.
+const messageBuffer = new MessageOrderBuffer(updateGameFromChat);
+let blockedFlushTimer: number | null = null;
+
+/**
+ * Capture one rendered chat row: log it verbatim (the logger dedups by index
+ * itself) and queue it for in-order parsing.
+ */
+function captureRow(element: HTMLElement): void {
+  logChatMessage(element);
+  messageBuffer.capture(element);
+}
+
+/**
+ * If rows are stuck behind a gap the scroller never rendered, give the gap a
+ * few seconds to fill (a re-render or user scroll may still supply it), then
+ * process what we have anyway so live tracking doesn't stall forever.
+ */
+function scheduleBlockedFlush(): void {
+  if (!messageBuffer.hasPending()) {
+    if (blockedFlushTimer !== null) {
+      clearTimeout(blockedFlushTimer);
+      blockedFlushTimer = null;
+    }
+    return;
+  }
+  if (blockedFlushTimer !== null) return;
+  blockedFlushTimer = window.setTimeout(() => {
+    blockedFlushTimer = null;
+    messageBuffer.drain();
+    if (messageBuffer.hasPending()) {
+      console.warn(
+        '⚠️ Chat gap never rendered — processing buffered rows out of contiguity'
+      );
+      messageBuffer.flush();
+    }
+    updateGameStateDisplay();
+  }, 3000);
+}
 
 const chatMutationCallback = (mutationsList: MutationRecord[]) => {
-  let processedAny = false;
+  let sawRows = false;
   for (const mutation of mutationsList) {
     mutation.addedNodes.forEach(addedNode => {
       if (addedNode.nodeType === Node.ELEMENT_NODE) {
-        const element = addedNode as HTMLElement;
-        updateGameFromChat(element);
-        processedAny = true;
+        captureRow(addedNode as HTMLElement);
+        sawRows = true;
       }
     });
   }
 
-  if (processedAny) {
+  if (sawRows) {
+    messageBuffer.drain();
+    scheduleBlockedFlush();
     // Wait for colonist's player-information panel to reflect this message, then
     // refine the variant tree by the live hand counts. Deferring a frame avoids
     // reading stale counts (and pruneByHandCounts no-ops if they don't help).
@@ -34,22 +83,12 @@ const chatMutationCallback = (mutationsList: MutationRecord[]) => {
   }
 };
 
-/**
- * Process all currently-rendered message rows, sorted by data-index ascending so
- * resources are applied in chronological order. Already-processed rows are
- * skipped by the parser's data-index dedup, so calling this repeatedly is safe.
- */
-function processRenderedMessages(chatContainer: HTMLElement): void {
-  const rows = Array.from(
-    chatContainer.querySelectorAll<HTMLElement>('[data-index]')
-  ).sort(
-    (a, b) =>
-      Number(a.getAttribute('data-index')) -
-      Number(b.getAttribute('data-index'))
-  );
-  for (const row of rows) {
-    updateGameFromChat(row);
-  }
+/** Capture all currently-rendered rows and parse the contiguous prefix. */
+function captureRenderedMessages(chatContainer: HTMLElement): void {
+  chatContainer
+    .querySelectorAll<HTMLElement>('[data-index]')
+    .forEach(row => captureRow(row));
+  messageBuffer.drain();
 }
 
 /**
@@ -57,10 +96,16 @@ function processRenderedMessages(chatContainer: HTMLElement): void {
  *
  * Colonist renders the chat as a virtual scroller that only keeps ~15 message
  * rows in the DOM at once, so on refresh the extension would otherwise see only
- * the most recent messages and miscount. We scroll the chat container from top to
- * bottom; each scroll step renders a fresh window of rows which we process in
- * ascending data-index order. Going top→bottom means indices are encountered in
- * chronological order, so the data-index dedup applies each message exactly once.
+ * the most recent messages and miscount. We scroll from top to bottom capturing
+ * each rendered window; the MessageOrderBuffer feeds the parser in data-index
+ * order regardless of render order.
+ *
+ * The sweep reads scrollTop/scrollHeight live on every step — the scroller
+ * corrects its estimated height as rows render, and re-pins to the bottom when
+ * a live message arrives mid-sweep, so a precomputed position would jump over
+ * whole stretches of the log (seen in practice as rows 68–243 never rendering).
+ * If a sweep ends with rows still stuck behind a gap, it re-sweeps up to two
+ * more times, then flushes whatever was captured.
  */
 async function loadChatHistory(chatContainer: HTMLElement): Promise<void> {
   // The scrollable element is the chat container's parent (the virtual scroller
@@ -70,28 +115,39 @@ async function loadChatHistory(chatContainer: HTMLElement): Promise<void> {
 
   // Not virtualized (or everything already fits): just process what's rendered.
   if (!scrollEl || scrollEl.scrollHeight <= scrollEl.clientHeight + 5) {
-    processRenderedMessages(chatContainer);
+    captureRenderedMessages(chatContainer);
+    messageBuffer.flush();
     return;
   }
 
-  const maxScroll = () => scrollEl.scrollHeight - scrollEl.clientHeight;
-  // Step by ~half a viewport so consecutive windows overlap (no skipped rows).
-  const step = Math.max(50, Math.floor(scrollEl.clientHeight * 0.5));
+  const MAX_SWEEPS = 3;
+  for (let sweep = 1; sweep <= MAX_SWEEPS; sweep++) {
+    scrollEl.scrollTop = 0;
+    await sleep(120); // let the scroller render the top of the log
 
-  scrollEl.scrollTop = 0;
-  await sleep(120); // let the scroller render the top of the log
+    let guard = 0;
+    while (guard++ < 1000) {
+      captureRenderedMessages(chatContainer);
+      const maxScroll = scrollEl.scrollHeight - scrollEl.clientHeight;
+      if (scrollEl.scrollTop >= maxScroll - 2) break;
+      // Step by ~half a viewport so consecutive windows overlap (no skipped
+      // rows), advancing from wherever the scroller ACTUALLY is right now.
+      const step = Math.max(50, Math.floor(scrollEl.clientHeight * 0.5));
+      scrollEl.scrollTop = Math.min(scrollEl.scrollTop + step, maxScroll);
+      await sleep(90); // wait for the next window of rows to render
+    }
+    // Final pass at the bottom in case the last window rendered after the loop.
+    captureRenderedMessages(chatContainer);
 
-  let pos = 0;
-  let guard = 0;
-  while (guard++ < 1000) {
-    processRenderedMessages(chatContainer);
-    if (pos >= maxScroll()) break;
-    pos = Math.min(pos + step, maxScroll());
-    scrollEl.scrollTop = pos;
-    await sleep(90); // wait for the next window of rows to render
+    if (!messageBuffer.hasPending()) return; // no gaps — history is complete
+    console.warn(
+      `⚠️ History sweep ${sweep}/${MAX_SWEEPS} left a gap in the chat log, ${
+        sweep < MAX_SWEEPS ? 'retrying...' : 'giving up on the gap'
+      }`
+    );
   }
-  // Final pass at the bottom in case the last window rendered after the loop.
-  processRenderedMessages(chatContainer);
+  // Gap rows never rendered; process everything captured after the gap anyway.
+  messageBuffer.flush();
 }
 
 function tryFindChat(): void {
@@ -105,6 +161,11 @@ function tryFindChat(): void {
 
     autoDetectCurrentPlayer();
 
+    // Start recording chat messages for this game (resumes any stored log for
+    // the same game id, e.g. after a refresh). History replay below will feed
+    // every message through the logger via captureRow.
+    void initMessageLogger();
+
     // Show the game state overlay
     showGameStateOverlay();
 
@@ -116,6 +177,10 @@ function tryFindChat(): void {
     loadChatHistory(chatContainer)
       .then(() => {
         console.log('✅ Finished processing chat history');
+        // The replay just caught up to the present, so the live hand counts in
+        // colonist's player panel are valid evidence against the rebuilt tree
+        // (this is what resolves post-monopoly ambiguity after a refresh).
+        applyHandCountResolution();
       })
       .finally(() => {
         // Calculations done: drop the loader and show the rebuilt counts.
@@ -172,6 +237,13 @@ function findAllChatMessages(): HTMLElement[] {
 
   return [];
 }
+
+// Console access to the stored game logs. From the page's DevTools console,
+// select the extension's content-script context, then run:
+//   __catanCounter.exportAllGameLogs()
+(window as unknown as Record<string, unknown>).__catanCounter = {
+  exportAllGameLogs,
+};
 
 // Start polling every 2 seconds
 const intervalId: number = window.setInterval(tryFindChat, 2000);
