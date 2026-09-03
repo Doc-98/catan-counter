@@ -1661,7 +1661,7 @@
     let currentLog = null;
     const seenIndices = new Set();
     let persistTimer = null;
-    function storageAvailable() {
+    function storageAvailable$1() {
         var _a;
         return typeof chrome !== 'undefined' && !!((_a = chrome === null || chrome === void 0 ? void 0 : chrome.storage) === null || _a === void 0 ? void 0 : _a.local);
     }
@@ -1689,7 +1689,7 @@
                 messages: [],
             };
             seenIndices.clear();
-            if (!storageAvailable())
+            if (!storageAvailable$1())
                 return;
             try {
                 const key = STORAGE_KEY_PREFIX + gameId;
@@ -1739,7 +1739,7 @@
         log.messages.sort((a, b) => a.index - b.index);
     }
     function schedulePersist() {
-        if (!storageAvailable())
+        if (!storageAvailable$1())
             return;
         if (persistTimer !== null)
             clearTimeout(persistTimer);
@@ -1750,7 +1750,7 @@
     }
     function persistCurrentLog() {
         return __awaiter(this, void 0, void 0, function* () {
-            if (!currentLog || !storageAvailable())
+            if (!currentLog || !storageAvailable$1())
                 return;
             snapshotMetadata(currentLog);
             try {
@@ -1799,7 +1799,7 @@
      */
     function exportAllGameLogs() {
         return __awaiter(this, void 0, void 0, function* () {
-            if (!storageAvailable()) {
+            if (!storageAvailable$1()) {
                 console.warn('📼 chrome.storage is not available');
                 return [];
             }
@@ -1964,6 +1964,52 @@
     // True while content.ts is scrolling the chat to rebuild history after a page
     // load/refresh. The overlay shows a loader instead of (stale/partial) counts.
     let isLoadingHistory = false;
+    // 'table' matches the original numeric layout; 'hand' renders each player's
+    // resources as a row of cards, closer to colonist's own hand tray.
+    let resourceViewMode = 'table';
+    const VIEW_MODE_STORAGE_KEY = 'catanResourceViewMode';
+    function storageAvailable() {
+        var _a;
+        return typeof chrome !== 'undefined' && !!((_a = chrome === null || chrome === void 0 ? void 0 : chrome.storage) === null || _a === void 0 ? void 0 : _a.local);
+    }
+    /**
+     * Load the persisted view mode preference (if any) from chrome.storage.local
+     * and apply it. Safe to call before the overlay exists — the mode is just
+     * picked up the next time it renders. Call once on startup (see content.ts).
+     */
+    function initResourceViewModePreference() {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!storageAvailable())
+                return;
+            try {
+                const stored = yield chrome.storage.local.get(VIEW_MODE_STORAGE_KEY);
+                const saved = stored[VIEW_MODE_STORAGE_KEY];
+                if (saved === 'table' || saved === 'hand') {
+                    resourceViewMode = saved;
+                    if (gameStateOverlay)
+                        updateOverlayContent(gameStateOverlay);
+                }
+            }
+            catch (error) {
+                console.warn('🃏 Could not load resource view mode preference:', error);
+            }
+        });
+    }
+    function persistResourceViewMode(mode) {
+        if (!storageAvailable())
+            return;
+        void chrome.storage.local
+            .set({ [VIEW_MODE_STORAGE_KEY]: mode })
+            .catch(error => {
+            console.warn('🃏 Could not persist resource view mode preference:', error);
+        });
+    }
+    function toggleResourceViewMode() {
+        resourceViewMode = resourceViewMode === 'table' ? 'hand' : 'table';
+        persistResourceViewMode(resourceViewMode);
+        if (gameStateOverlay)
+            updateOverlayContent(gameStateOverlay);
+    }
     function createGameStateOverlay() {
         const overlay = document.createElement('div');
         overlay.id = 'catan-game-state-overlay';
@@ -2012,7 +2058,8 @@
         const header = gameStateOverlay.querySelector('#overlay-header');
         if (!(header === null || header === void 0 ? void 0 : header.contains(target)) ||
             target.id === 'minimize-btn' ||
-            target.id === 'save-log-btn')
+            target.id === 'save-log-btn' ||
+            target.id === 'view-toggle-btn')
             return;
         isDragging = true;
         const rect = gameStateOverlay.getBoundingClientRect();
@@ -2119,6 +2166,106 @@
         });
         table += '</tbody></table></div>';
         return table;
+    }
+    const HAND_CARD_WIDTH = 40;
+    const HAND_CARD_HEIGHT = 56;
+    /**
+     * Render one resource card. A guaranteed card is opaque with a solid border;
+     * an "additional" card (the single blended probability of holding more than
+     * the guaranteed minimum, see getPlayerResourceProbabilities) is drawn faded
+     * with a dashed border and a probability badge, so uncertainty is visible on
+     * the card itself instead of needing a separate legend.
+     */
+    function createHandCardHtml(resource, probability) {
+        const iconUrl = getResourceIconUrl(resource);
+        const isUncertain = probability !== undefined;
+        // Keep faded cards legible even at low probability (floor around 35%
+        // opacity) while still scaling up toward fully opaque as probability rises.
+        const opacity = isUncertain ? 0.35 + 0.55 * probability : 1;
+        const badge = isUncertain
+            ? `<span style="
+        position: absolute;
+        bottom: 2px;
+        right: 2px;
+        background: rgba(255, 255, 255, 0.9);
+        color: #333;
+        font-size: 9px;
+        font-weight: bold;
+        line-height: 1.4;
+        padding: 0 3px;
+        border-radius: 3px;
+      ">${Math.round(probability * 100)}%</span>`
+            : '';
+        const title = isUncertain
+            ? `Maybe ${formatResourceName(resource)} (${Math.round(probability * 100)}% chance of one more)`
+            : formatResourceName(resource);
+        return `
+    <div class="hand-card" style="
+      position: relative;
+      width: ${HAND_CARD_WIDTH}px;
+      height: ${HAND_CARD_HEIGHT}px;
+      flex: 0 0 auto;
+      border-radius: 4px;
+      overflow: hidden;
+      opacity: ${opacity};
+      border: ${isUncertain ? '2px dashed #d4a017' : '1px solid rgba(0,0,0,0.25)'};
+      box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+      background: white;
+    " title="${title}">
+      <img src="${iconUrl}" alt="${resource}"
+        style="width: 100%; height: 100%; object-fit: cover; display: block;" />
+      ${badge}
+    </div>
+  `;
+    }
+    /**
+     * Alternative to generateResourceProbabilityTable(): renders each player's
+     * resources as a row of cards (colonist's own hand tray, reusing the same
+     * card art) instead of a numeric table. Uses the exact same underlying data
+     * (minimumResources / additionalResourceProbabilities) so the two views never
+     * disagree — only the presentation differs.
+     */
+    function generateResourceHandView() {
+        if (!game.probableGameState || game.players.length === 0) {
+            return '';
+        }
+        const resourceNames = ['tree', 'brick', 'sheep', 'wheat', 'ore'];
+        let html = '<div style="margin-top: 15px;"><h4 style="margin: 0 0 10px 0; text-align: center;">Resource Hands</h4>';
+        getOrderedPlayers().forEach(player => {
+            const probabilities = game.probableGameState.getPlayerResourceProbabilities(player.name);
+            const cards = [];
+            let knownTotal = 0;
+            resourceNames.forEach(resource => {
+                const minCount = probabilities.minimumResources[resource];
+                const additionalProb = probabilities.additionalResourceProbabilities[resource];
+                knownTotal += minCount;
+                for (let i = 0; i < minCount; i++) {
+                    cards.push(createHandCardHtml(resource));
+                }
+                if (additionalProb > 0) {
+                    cards.push(createHandCardHtml(resource, additionalProb));
+                }
+            });
+            html += `
+      <div style="
+        margin-bottom: 10px;
+        padding: 8px;
+        background: #f8f9fa;
+        border-radius: 6px;
+        border-left: 4px solid ${player.color};
+      ">
+        <div style="font-weight: bold; color: ${player.color}; margin-bottom: 6px;">
+          ${player.name}
+          <span style="font-weight: normal; color: #666; font-size: 10px;">(${knownTotal} known)</span>
+        </div>
+        <div style="display: flex; flex-wrap: wrap; gap: 4px;">
+          ${cards.length > 0 ? cards.join('') : '<span style="color: #999; font-size: 11px;">No cards</span>'}
+        </div>
+      </div>
+    `;
+        });
+        html += '</div>';
+        return html;
     }
     function generateDevCardsDisplay() {
         const devCardTypes = [
@@ -2352,9 +2499,15 @@
         }
     }
     function generateMainContent() {
+        const resourceSection = resourceViewMode === 'hand'
+            ? generateResourceHandView()
+            : generateResourceProbabilityTable();
+        const resourceCaption = resourceViewMode === 'hand'
+            ? 'Solid cards are guaranteed; faded dashed cards show the chance of one more.'
+            : 'Numbers shown are guaranteed resources, additional resources are shown as a probability';
         return `
-    ${generateResourceProbabilityTable()}
-    <div style="font-size: 12px; color: #666; text-align: center; line-height: 1.1;">Numbers shown are guaranteed resources, additional resources are shown as a probability</div>
+    ${resourceSection}
+    <div style="font-size: 12px; color: #666; text-align: center; line-height: 1.1;">${resourceCaption}</div>
     ${generateUnknownTransactionsDisplay()}
     ${generateDevCardsDisplay()}
     <div style="font-size: 12px; color: #666; text-align: center; line-height: 1.1;">Cards in your hand are currently not counted</div>
@@ -2430,6 +2583,15 @@
     ">
       <div style="font-weight: bold;">🎲 Catan Counter</div>
       <div style="display: flex; align-items: center; gap: 2px;">
+        <button id="view-toggle-btn" style="
+          background: none;
+          border: none;
+          color: white;
+          cursor: pointer;
+          font-size: 14px;
+          padding: 2px 6px;
+          border-radius: 3px;
+        " title="${resourceViewMode === 'table' ? 'Switch to Hand view' : 'Switch to Table view'}">${resourceViewMode === 'table' ? '🃏' : '📋'}</button>
         <button id="save-log-btn" style="
           background: none;
           border: none;
@@ -2471,6 +2633,14 @@
             minimizeBtn.addEventListener('click', e => {
                 e.stopPropagation(); // Prevent dragging when clicking minimize
                 toggleMinimize();
+            });
+        }
+        // Add view-toggle button functionality
+        const viewToggleBtn = overlay.querySelector('#view-toggle-btn');
+        if (viewToggleBtn) {
+            viewToggleBtn.addEventListener('click', e => {
+                e.stopPropagation(); // Prevent dragging when clicking the toggle
+                toggleResourceViewMode();
             });
         }
         // Add save-log button functionality
@@ -3500,6 +3670,10 @@
     window.__catanCounter = {
         exportAllGameLogs,
     };
+    // Load the persisted resource view mode (table vs. hand) so the overlay
+    // renders in the user's last-chosen mode instead of always defaulting to the
+    // table. Independent of chat detection, so this doesn't need to wait on it.
+    void initResourceViewModePreference();
     // Start polling every 2 seconds
     const intervalId = window.setInterval(tryFindChat, 2000);
     // Optionally run immediately
