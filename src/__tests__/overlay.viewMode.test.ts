@@ -85,6 +85,47 @@ describe('overlay resource view mode', () => {
     expect(html).toMatch(/\d+%<\/span>/);
   });
 
+  it('fans out same-resource cards but leaves single cards and different resources flush', () => {
+    _setResourceViewModeForTesting('hand');
+    showGameStateOverlay();
+    const overlay = getOverlay();
+
+    // Alice has brick:2, sheep:1 guaranteed (from beforeEach), plus a 50/50
+    // uncertain tree-or-wheat card from the unknownSteal. Only the brick
+    // pair should overlap — everything else is a lone card in its group.
+    const aliceRow = overlay.querySelector('[data-player-hand="Alice"]')!;
+    const aliceCards = Array.from(
+      aliceRow.querySelectorAll<HTMLElement>('.hand-card')
+    );
+    // jsdom's CSSOM (cssstyle) rejects negative lengths in its `.style.*`
+    // setters/getters (a known jsdom quirk — real browsers parse
+    // `margin-left: -22px` correctly), so this checks the raw style
+    // attribute text rather than the parsed `.style.marginLeft` property.
+    const hasOverlap = (card: HTMLElement) =>
+      (card.getAttribute('style') || '').includes('margin-left: -');
+    const isUncertain = (card: HTMLElement) =>
+      (card.getAttribute('style') || '').includes('dashed');
+
+    const brickCards = aliceCards.filter(
+      c => c.querySelector('img')?.getAttribute('alt') === 'brick'
+    );
+    expect(brickCards).toHaveLength(2);
+    expect(hasOverlap(brickCards[0])).toBe(false);
+    expect(hasOverlap(brickCards[1])).toBe(true);
+
+    const sheepCards = aliceCards.filter(
+      c => c.querySelector('img')?.getAttribute('alt') === 'sheep'
+    );
+    expect(sheepCards).toHaveLength(1);
+    expect(hasOverlap(sheepCards[0])).toBe(false);
+
+    // The lone uncertain card(s) (tree and/or wheat) shouldn't overlap either
+    // — each is the only card in its own resource group.
+    aliceCards
+      .filter(isUncertain)
+      .forEach(c => expect(hasOverlap(c)).toBe(false));
+  });
+
   it('persists the chosen view mode and reloads it via initResourceViewModePreference', async () => {
     const store: Record<string, unknown> = {};
     (globalThis as any).chrome = {

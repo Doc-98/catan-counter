@@ -2169,15 +2169,26 @@
     }
     const HAND_CARD_WIDTH = 40;
     const HAND_CARD_HEIGHT = 56;
+    // How much of the previous same-resource card a following one covers, so a
+    // run of duplicates fans out like a real hand instead of sitting edge to
+    // edge. Only applied between cards of the same resource — the flex gap alone
+    // separates one resource group from the next (see generateResourceHandView).
+    const HAND_CARD_OVERLAP_PX = 22;
     /**
      * Render one resource card. A guaranteed card is opaque with a solid border;
      * an "additional" card (the single blended probability of holding more than
      * the guaranteed minimum, see getPlayerResourceProbabilities) is drawn faded
      * with a dashed border and a probability badge, so uncertainty is visible on
      * the card itself instead of needing a separate legend.
+     *
+     * `stackOnPrevious` pulls this card left to overlap the one before it in the
+     * same resource group. Later cards paint over earlier ones in normal flow,
+     * so the last (front) card of a group is always the fully visible one —
+     * which is why the uncertain card, pushed last, ends up on top.
      */
-    function createHandCardHtml(resource, probability) {
+    function createHandCardHtml(resource, options) {
         const iconUrl = getResourceIconUrl(resource);
+        const probability = options === null || options === void 0 ? void 0 : options.probability;
         const isUncertain = probability !== undefined;
         // Keep faded cards legible even at low probability (floor around 35%
         // opacity) while still scaling up toward fully opaque as probability rises.
@@ -2199,6 +2210,9 @@
         const title = isUncertain
             ? `Maybe ${formatResourceName(resource)} (${Math.round(probability * 100)}% chance of one more)`
             : formatResourceName(resource);
+        const overlapStyle = (options === null || options === void 0 ? void 0 : options.stackOnPrevious)
+            ? `margin-left: -${HAND_CARD_OVERLAP_PX}px;`
+            : '';
         return `
     <div class="hand-card" style="
       position: relative;
@@ -2211,6 +2225,7 @@
       border: ${isUncertain ? '2px dashed #d4a017' : '1px solid rgba(0,0,0,0.25)'};
       box-shadow: 0 1px 3px rgba(0,0,0,0.25);
       background: white;
+      ${overlapStyle}
     " title="${title}">
       <img src="${iconUrl}" alt="${resource}"
         style="width: 100%; height: 100%; object-fit: cover; display: block;" />
@@ -2240,14 +2255,20 @@
                 const additionalProb = probabilities.additionalResourceProbabilities[resource];
                 knownTotal += minCount;
                 for (let i = 0; i < minCount; i++) {
-                    cards.push(createHandCardHtml(resource));
+                    cards.push(createHandCardHtml(resource, { stackOnPrevious: i > 0 }));
                 }
                 if (additionalProb > 0) {
-                    cards.push(createHandCardHtml(resource, additionalProb));
+                    cards.push(createHandCardHtml(resource, {
+                        probability: additionalProb,
+                        // Only the very first card of a group (this one, if it's the
+                        // only card) sits flush; otherwise it fans out on top of the
+                        // guaranteed cards ahead of it, becoming the visible "front" card.
+                        stackOnPrevious: minCount > 0,
+                    }));
                 }
             });
             html += `
-      <div style="
+      <div data-player-hand="${player.name}" style="
         margin-bottom: 10px;
         padding: 8px;
         background: #f8f9fa;
