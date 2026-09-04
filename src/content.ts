@@ -8,7 +8,7 @@ import {
   showGameStateOverlay,
   setHistoryLoading,
   updateGameStateDisplay,
-  initResourceViewModePreference,
+  initOverlayPreferences,
 } from './overlay.js';
 import { resetGameState, autoDetectCurrentPlayer } from './gameState.js';
 import {
@@ -246,10 +246,11 @@ function findAllChatMessages(): HTMLElement[] {
   exportAllGameLogs,
 };
 
-// Load the persisted resource view mode (table vs. hand) so the overlay
-// renders in the user's last-chosen mode instead of always defaulting to the
-// table. Independent of chat detection, so this doesn't need to wait on it.
-void initResourceViewModePreference();
+// Load persisted overlay UI preferences (resource view mode, collapsed
+// sections, ...) so the overlay renders the way the user last left it instead
+// of always defaulting. Independent of chat detection, so this doesn't need
+// to wait on it.
+void initOverlayPreferences();
 
 // Start polling every 2 seconds
 const intervalId: number = window.setInterval(tryFindChat, 2000);

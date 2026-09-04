@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach, jest } from '@jest/globals';
 import {
   showGameStateOverlay,
-  initResourceViewModePreference,
-  _setResourceViewModeForTesting,
+  initOverlayPreferences,
+  _setOverlayUiPrefsForTesting,
   _resetOverlayForTesting,
 } from '../overlay';
 import { resetGameState, game } from '../gameState';
@@ -20,7 +20,6 @@ describe('overlay resource view mode', () => {
     document.body.innerHTML = '';
     resetGameState();
     _resetOverlayForTesting();
-    _setResourceViewModeForTesting('table');
     // overlay.ts uses chrome.runtime.getURL for resource icons; stub it.
     (globalThis as any).chrome = { runtime: { getURL: (p: string) => p } };
 
@@ -72,21 +71,37 @@ describe('overlay resource view mode', () => {
     expect(overlay.textContent).not.toContain('Resource Hands');
   });
 
-  it('renders an uncertain card distinctly from guaranteed ones', () => {
-    _setResourceViewModeForTesting('hand');
+  it('renders an uncertain card as a whitened overlay, not a transparent one', () => {
+    _setOverlayUiPrefsForTesting({ resourceViewMode: 'hand' });
     showGameStateOverlay();
     const overlay = getOverlay();
 
     // The unknownSteal in beforeEach makes Bob's post-steal hand uncertain
-    // between two resource types, so at least one player has a dashed,
-    // reduced-opacity "maybe" card with a percentage badge.
+    // between two resource types, so at least one player has a dashed
+    // "maybe" card with a percentage badge.
     const html = overlay.innerHTML;
     expect(html).toContain('dashed');
     expect(html).toMatch(/\d+%<\/span>/);
+
+    // The card itself must stay fully opaque (never `opacity:` on the card),
+    // with the uncertainty expressed as a white wash layered on top instead
+    // — a transparent front card would let a stacked card behind it bleed
+    // through, undermining the fan-out effect.
+    const cards = Array.from(overlay.querySelectorAll<HTMLElement>('.hand-card'));
+    cards.forEach(card => {
+      expect(card.getAttribute('style') || '').not.toMatch(/opacity:/);
+    });
+    const uncertainCard = cards.find(c =>
+      (c.getAttribute('style') || '').includes('dashed')
+    )!;
+    expect(uncertainCard).toBeTruthy();
+    expect(uncertainCard.innerHTML).toMatch(
+      /background: rgba\(255, 255, 255, 0\.\d+\)/
+    );
   });
 
-  it('fans out same-resource cards but leaves single cards and different resources flush', () => {
-    _setResourceViewModeForTesting('hand');
+  it('fans out same-resource cards (32px overlap) but leaves single cards and different resources flush', () => {
+    _setOverlayUiPrefsForTesting({ resourceViewMode: 'hand' });
     showGameStateOverlay();
     const overlay = getOverlay();
 
@@ -99,10 +114,11 @@ describe('overlay resource view mode', () => {
     );
     // jsdom's CSSOM (cssstyle) rejects negative lengths in its `.style.*`
     // setters/getters (a known jsdom quirk — real browsers parse
-    // `margin-left: -22px` correctly), so this checks the raw style
+    // `margin-left: -32px` correctly), so this checks the raw style
     // attribute text rather than the parsed `.style.marginLeft` property.
-    const hasOverlap = (card: HTMLElement) =>
-      (card.getAttribute('style') || '').includes('margin-left: -');
+    const overlapMargin = (card: HTMLElement): string | null =>
+      (card.getAttribute('style') || '').match(/margin-left: (-\d+)px/)?.[1] ??
+      null;
     const isUncertain = (card: HTMLElement) =>
       (card.getAttribute('style') || '').includes('dashed');
 
@@ -110,23 +126,23 @@ describe('overlay resource view mode', () => {
       c => c.querySelector('img')?.getAttribute('alt') === 'brick'
     );
     expect(brickCards).toHaveLength(2);
-    expect(hasOverlap(brickCards[0])).toBe(false);
-    expect(hasOverlap(brickCards[1])).toBe(true);
+    expect(overlapMargin(brickCards[0])).toBeNull();
+    expect(overlapMargin(brickCards[1])).toBe('-32');
 
     const sheepCards = aliceCards.filter(
       c => c.querySelector('img')?.getAttribute('alt') === 'sheep'
     );
     expect(sheepCards).toHaveLength(1);
-    expect(hasOverlap(sheepCards[0])).toBe(false);
+    expect(overlapMargin(sheepCards[0])).toBeNull();
 
     // The lone uncertain card(s) (tree and/or wheat) shouldn't overlap either
     // — each is the only card in its own resource group.
     aliceCards
       .filter(isUncertain)
-      .forEach(c => expect(hasOverlap(c)).toBe(false));
+      .forEach(c => expect(overlapMargin(c)).toBeNull());
   });
 
-  it('persists the chosen view mode and reloads it via initResourceViewModePreference', async () => {
+  it('persists the chosen view mode and reloads it via initOverlayPreferences', async () => {
     const store: Record<string, unknown> = {};
     (globalThis as any).chrome = {
       runtime: { getURL: (p: string) => p },
@@ -146,14 +162,107 @@ describe('overlay resource view mode', () => {
     let overlay = getOverlay();
     (overlay.querySelector('#view-toggle-btn') as HTMLButtonElement).click();
 
-    expect(store['catanResourceViewMode']).toBe('hand');
+    expect(
+      (store['catanOverlayUiPrefs'] as { resourceViewMode?: string })
+        ?.resourceViewMode
+    ).toBe('hand');
 
-    // Simulate a fresh load: reset the in-memory mode back to the default,
-    // then confirm the persisted preference is picked back up.
-    _setResourceViewModeForTesting('table');
-    await initResourceViewModePreference();
+    // Simulate a fresh load: reset in-memory prefs to defaults, then confirm
+    // the persisted preference is picked back up.
+    _setOverlayUiPrefsForTesting({ resourceViewMode: 'table' });
+    await initOverlayPreferences();
 
     overlay = getOverlay();
     expect(overlay.textContent).toContain('Resource Hands');
+  });
+});
+
+describe('overlay dice chart collapse', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '';
+    resetGameState();
+    _resetOverlayForTesting();
+    (globalThis as any).chrome = { runtime: { getURL: (p: string) => p } };
+
+    placeSettlement('Alice');
+    game.probableGameState = new PropbableGameState(game.players);
+    game.hasRolledFirstDice = true;
+    game.diceRolls[8] = 3;
+  });
+
+  it('is expanded by default and collapses/expands via its header', () => {
+    showGameStateOverlay();
+    let overlay = getOverlay();
+
+    expect(overlay.textContent).toContain('Dice Roll Frequency');
+    const header = overlay.querySelector(
+      '#dice-chart-header'
+    ) as HTMLElement;
+    expect(header).toBeTruthy();
+    expect(header.textContent).toContain('▾');
+    expect(header.title).toContain('Hide');
+    // Expanded: the 6/8 bar's teal color from the 3 rolls of 8 seeded above.
+    expect(overlay.innerHTML).toContain('#4ecdc4');
+
+    header.click();
+    overlay = getOverlay();
+    const collapsedHeader = overlay.querySelector(
+      '#dice-chart-header'
+    ) as HTMLElement;
+    expect(collapsedHeader.textContent).toContain('▸');
+    expect(collapsedHeader.title).toContain('Show');
+    // Collapsed: the header survives, but the bars (and their colors) don't.
+    expect(overlay.innerHTML).not.toContain('#4ecdc4');
+
+    collapsedHeader.click();
+    overlay = getOverlay();
+    expect(
+      (overlay.querySelector('#dice-chart-header') as HTMLElement).textContent
+    ).toContain('▾');
+  });
+});
+
+describe('overlay unresolved-steals display', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '';
+    resetGameState();
+    _resetOverlayForTesting();
+    (globalThis as any).chrome = { runtime: { getURL: (p: string) => p } };
+
+    placeSettlement('Aaren');
+    placeSettlement('Bora');
+    game.probableGameState = new PropbableGameState(game.players);
+    playerGetResources('Bora', { tree: 1, wheat: 1 });
+    unknownSteal('Aaren', 'Bora');
+    game.hasRolledFirstDice = true;
+  });
+
+  it('renders thief/victim with icons instead of a "stole from" sentence', () => {
+    showGameStateOverlay();
+    const overlay = getOverlay();
+
+    expect(overlay.textContent).toContain('Aaren');
+    expect(overlay.textContent).toContain('Bora');
+    expect(overlay.textContent).not.toContain('stole from');
+    expect(overlay.textContent).not.toContain('Could be:');
+    expect(overlay.innerHTML).toContain('🦹');
+
+    // Candidate resources render as icon chips with a percentage, not a
+    // "resource: 0.50" text list.
+    const item = overlay.querySelector('.unknown-transaction-item')!;
+    expect(item.querySelectorAll('img[alt="tree"], img[alt="wheat"]').length)
+      .toBeGreaterThan(0);
+    expect(item.textContent).toMatch(/\d+%/);
+  });
+
+  it('still opens the resolution modal when clicked', () => {
+    showGameStateOverlay();
+    const overlay = getOverlay();
+    const item = overlay.querySelector(
+      '.unknown-transaction-item'
+    ) as HTMLElement;
+    item.click();
+
+    expect(document.body.textContent).toContain('Resolve Unknown Transaction');
   });
 });
