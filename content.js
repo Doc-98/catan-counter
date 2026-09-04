@@ -2021,13 +2021,15 @@
     top: 20px;
     right: 20px;
     width: 450px;
-    max-height: 1000px;
+    max-height: calc(100vh - 40px);
     background: white;
     border: 2px solid #333;
     border-radius: 8px;
     font-family: Arial, sans-serif;
     font-size: 12px;
-    overflow: visible;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
     z-index: 10000;
     box-shadow: 0 4px 8px rgba(0,0,0,0.3);
     color: black;
@@ -2659,15 +2661,16 @@
                 : generateWaitingContent();
         overlay.innerHTML = `
     <div id="overlay-header" style="
-      background: #2c3e50; 
-      color: white; 
-      padding: 10px; 
-      border-radius: 6px 6px ${isMinimized ? '6px 6px' : '0 0'}; 
-      display: flex; 
-      justify-content: space-between; 
+      background: #2c3e50;
+      color: white;
+      padding: 10px;
+      border-radius: 6px 6px ${isMinimized ? '6px 6px' : '0 0'};
+      display: flex;
+      justify-content: space-between;
       align-items: center;
       cursor: move;
       user-select: none;
+      flex: 0 0 auto;
     ">
       <div style="font-weight: bold;">🎲 Catan Counter</div>
       <div style="display: flex; align-items: center; gap: 2px;">
@@ -2701,7 +2704,7 @@
       </div>
     </div>
     
-    <div id="overlay-content" style="display: ${contentDisplay}; padding: 15px; max-height: 800px; overflow-y: auto; position: relative;">
+    <div id="overlay-content" style="display: ${contentDisplay}; padding: 15px; flex: 1 1 auto; min-height: 0; overflow-y: auto; position: relative;">
       ${mainContent}
       <div class="resize-handle" style="
         position: absolute;
