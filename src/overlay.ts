@@ -213,9 +213,15 @@ interface OverlayUiPrefs {
   // 'table' matches the original numeric layout; 'hand' renders each
   // player's resources as a row of cards, closer to colonist's own hand tray.
   resourceViewMode: ResourceViewMode;
-  // Every section below the resource view (table/hand) collapses
-  // independently to just its header — same interaction as the original
-  // dice chart toggle, now shared by all of them.
+  // Everything below the resource view (Unresolved Steals, Development
+  // Cards, Dice Roll Frequency, Blocked by Robber) lives inside the
+  // "More stats" block. When true, none of it renders — not even the
+  // section headers — leaving just the toggle button. Starts collapsed so
+  // the resource view is what's on screen at a glance.
+  moreStatsCollapsed: boolean;
+  // Once "More stats" is open, each section inside it still collapses
+  // independently to just its own header — same interaction the dice
+  // chart originally had, now shared by all of them.
   unknownTransactionsCollapsed: boolean;
   devCardsCollapsed: boolean;
   diceChartCollapsed: boolean;
@@ -224,6 +230,7 @@ interface OverlayUiPrefs {
 
 let uiPrefs: OverlayUiPrefs = {
   resourceViewMode: 'table',
+  moreStatsCollapsed: true,
   unknownTransactionsCollapsed: false,
   devCardsCollapsed: false,
   diceChartCollapsed: false,
@@ -252,6 +259,9 @@ export async function initOverlayPreferences(): Promise<void> {
 
     if (saved.resourceViewMode === 'table' || saved.resourceViewMode === 'hand') {
       uiPrefs.resourceViewMode = saved.resourceViewMode;
+    }
+    if (typeof saved.moreStatsCollapsed === 'boolean') {
+      uiPrefs.moreStatsCollapsed = saved.moreStatsCollapsed;
     }
     if (typeof saved.unknownTransactionsCollapsed === 'boolean') {
       uiPrefs.unknownTransactionsCollapsed = saved.unknownTransactionsCollapsed;
@@ -312,42 +322,13 @@ function toggleBlockedDiceCollapsed(): void {
 }
 
 /**
- * Collapsed state of each section that currently has something to show —
- * a section that isn't rendered (e.g. no unresolved steals) doesn't count
- * either way, so the "collapse/expand all" button reflects only what's
- * actually on screen.
+ * Toggle the "More stats" block — Unresolved Steals, Development Cards,
+ * Dice Roll Frequency, and Blocked by Robber all live inside it. Unlike
+ * each section's own collapse (which still shows its header), this hides
+ * the entire block, headers included, down to just the toggle button.
  */
-function visibleSectionCollapsedStates(): boolean[] {
-  const hasUnknownTransactions =
-    game.probableGameState
-      .getUnknownTransactions()
-      .filter(t => !t.isResolved).length > 0;
-  const hasBlockedRolls = Object.keys(game.blockedDiceRolls).length > 0;
-
-  const states = [uiPrefs.devCardsCollapsed, uiPrefs.diceChartCollapsed];
-  if (hasUnknownTransactions) states.push(uiPrefs.unknownTransactionsCollapsed);
-  if (hasBlockedRolls) states.push(uiPrefs.blockedDiceCollapsed);
-  return states;
-}
-
-function areAllSectionsCollapsed(): boolean {
-  const states = visibleSectionCollapsedStates();
-  return states.length > 0 && states.every(Boolean);
-}
-
-/**
- * Bulk toggle for every collapsible section (Unresolved Steals, Development
- * Cards, Dice Roll Frequency, Blocked by Robber). Collapses all of them
- * unless they're already all collapsed, in which case it expands all of
- * them — mirrors a single section's own toggle, just applied to every
- * section at once.
- */
-function toggleCollapseAll(): void {
-  const collapse = !areAllSectionsCollapsed();
-  uiPrefs.unknownTransactionsCollapsed = collapse;
-  uiPrefs.devCardsCollapsed = collapse;
-  uiPrefs.diceChartCollapsed = collapse;
-  uiPrefs.blockedDiceCollapsed = collapse;
+function toggleMoreStatsCollapsed(): void {
+  uiPrefs.moreStatsCollapsed = !uiPrefs.moreStatsCollapsed;
   persistUiPrefs();
   if (gameStateOverlay) updateOverlayContent(gameStateOverlay);
 }
@@ -371,6 +352,7 @@ export function _resetOverlayForTesting(): void {
   currentScale = 1;
   uiPrefs = {
     resourceViewMode: 'table',
+    moreStatsCollapsed: true,
     unknownTransactionsCollapsed: false,
     devCardsCollapsed: false,
     diceChartCollapsed: false,
@@ -489,7 +471,15 @@ function stopDragAndResize(): void {
   isResizing = false;
 }
 
-function getOrderedPlayers() {
+/**
+ * Players other than you, in turn order starting with whoever goes right
+ * after you. Used by the resource views (table and hand) — your own hand
+ * is deliberately left out of both: you already know it card-for-card, so
+ * showing it back to you is just noise. The one thing it doesn't cover —
+ * what opponents might infer about your hand from what they've seen — isn't
+ * information you need either, so it's not worth the space.
+ */
+function getOrderedOpponents() {
   if (!game.youPlayerName) {
     return game.players;
   }
@@ -502,12 +492,12 @@ function getOrderedPlayers() {
     return game.players;
   }
 
-  // Create ordered array: players after youPlayer, then players before youPlayer, then youPlayer
+  // Players after youPlayer, then players before youPlayer — youPlayer
+  // itself is excluded.
   const playersAfter = game.players.slice(youPlayerIndex + 1);
   const playersBefore = game.players.slice(0, youPlayerIndex);
-  const youPlayer = game.players[youPlayerIndex];
 
-  return [...playersAfter, ...playersBefore, youPlayer];
+  return [...playersAfter, ...playersBefore];
 }
 
 function generateResourceProbabilityTable(): string {
@@ -549,8 +539,8 @@ function generateResourceProbabilityTable(): string {
 
   table += '</tr></thead><tbody>';
 
-  // Player rows - using ordered players with youPlayer last
-  const orderedPlayers = getOrderedPlayers();
+  // Player rows - opponents only, in turn order (your own hand is excluded)
+  const orderedPlayers = getOrderedOpponents();
   orderedPlayers.forEach(player => {
     const probabilities =
       game.probableGameState!.getPlayerResourceProbabilities(player.name);
@@ -683,7 +673,7 @@ function generateResourceHandView(): string {
   let html =
     '<div style="margin-top: 15px;"><h4 style="margin: 0 0 10px 0; text-align: center;">Resource Hands</h4>';
 
-  getOrderedPlayers().forEach(player => {
+  getOrderedOpponents().forEach(player => {
     const probabilities = game.probableGameState!.getPlayerResourceProbabilities(
       player.name
     );
@@ -762,17 +752,19 @@ function generateSectionHeader(
 }
 
 /**
- * Bulk-toggle button placed just above Unresolved Steals — the first
- * collapsible section — collapsing or expanding every section below the
- * resource view at once. Reflects the combined state of whatever sections
- * are actually visible right now (see areAllSectionsCollapsed).
+ * Toggle button for the "More stats" block — Unresolved Steals, Development
+ * Cards, Dice Roll Frequency, and Blocked by Robber all render as its
+ * children (see generateMainContent). Collapsed, none of them render at
+ * all — not even their headers, just this button reading "More stats".
+ * Expanded, it reads "Collapse all" and each child section is still
+ * independently collapsible via its own header.
  */
-function generateCollapseAllControl(): string {
-  const allCollapsed = areAllSectionsCollapsed();
+function generateMoreStatsToggle(): string {
+  const collapsed = uiPrefs.moreStatsCollapsed;
   return `
     <div style="display: flex; justify-content: center; margin: 12px 0 4px;">
       <button
-        id="collapse-all-btn"
+        id="more-stats-btn"
         style="
           background: none;
           border: 1px solid #ccc;
@@ -782,8 +774,8 @@ function generateCollapseAllControl(): string {
           color: #555;
           cursor: pointer;
         "
-        title="${allCollapsed ? 'Expand' : 'Collapse'} every section below"
-      >${allCollapsed ? '▸ Expand all' : '▾ Collapse all'}</button>
+        title="${collapsed ? 'Show' : 'Hide'} Unresolved Steals, Development Cards, Dice Roll Frequency, and Blocked by Robber"
+      >${collapsed ? '▸ More stats' : '▾ Collapse all'}</button>
     </div>
   `;
 }
@@ -1196,15 +1188,21 @@ function generateMainContent(): string {
       ? 'Solid cards are guaranteed; whitened dashed cards show the chance of one more.'
       : 'Numbers shown are guaranteed resources, additional resources are shown as a probability';
 
+  const moreStats = uiPrefs.moreStatsCollapsed
+    ? ''
+    : `
+      ${generateUnknownTransactionsDisplay()}
+      ${generateDevCardsDisplay()}
+      <div style="font-size: 12px; color: #666; text-align: center; line-height: 1.1;">Cards in your hand are currently not counted</div>
+      ${generateDiceChart()}
+      ${generateBlockedDiceDisplay()}
+    `;
+
   return `
     ${resourceSection}
     <div style="font-size: 12px; color: #666; text-align: center; line-height: 1.1;">${resourceCaption}</div>
-    ${generateCollapseAllControl()}
-    ${generateUnknownTransactionsDisplay()}
-    ${generateDevCardsDisplay()}
-    <div style="font-size: 12px; color: #666; text-align: center; line-height: 1.1;">Cards in your hand are currently not counted</div>
-    ${generateDiceChart()}
-    ${generateBlockedDiceDisplay()}
+    ${generateMoreStatsToggle()}
+    ${moreStats}
   `;
 }
 
@@ -1378,14 +1376,14 @@ function updateOverlayContent(overlay: HTMLDivElement): void {
     });
   }
 
-  // Add "collapse/expand all" bulk toggle functionality
-  const collapseAllBtn = overlay.querySelector(
-    '#collapse-all-btn'
+  // Add "More stats" block toggle functionality
+  const moreStatsBtn = overlay.querySelector(
+    '#more-stats-btn'
   ) as HTMLButtonElement;
-  if (collapseAllBtn) {
-    collapseAllBtn.addEventListener('click', e => {
+  if (moreStatsBtn) {
+    moreStatsBtn.addEventListener('click', e => {
       e.stopPropagation();
-      toggleCollapseAll();
+      toggleMoreStatsCollapsed();
     });
   }
 

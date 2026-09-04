@@ -5,7 +5,7 @@ import {
   _setOverlayUiPrefsForTesting,
   _resetOverlayForTesting,
 } from '../overlay';
-import { resetGameState, game } from '../gameState';
+import { resetGameState, game, setYouPlayerForTesting } from '../gameState';
 import { PropbableGameState } from '../probableGameState';
 import { placeSettlement, playerGetResources, unknownSteal } from '../gameActions';
 
@@ -177,11 +177,51 @@ describe('overlay resource view mode', () => {
   });
 });
 
+describe('overlay resource views exclude your own hand', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '';
+    resetGameState();
+    _resetOverlayForTesting();
+    (globalThis as any).chrome = { runtime: { getURL: (p: string) => p } };
+
+    placeSettlement('Alice');
+    placeSettlement('Bob');
+    game.probableGameState = new PropbableGameState(game.players);
+    playerGetResources('Alice', { brick: 2, sheep: 1 });
+    playerGetResources('Bob', { tree: 1, wheat: 1 });
+    game.hasRolledFirstDice = true;
+    setYouPlayerForTesting('Alice');
+  });
+
+  it('leaves your own row out of the hand view — you already know your own hand', () => {
+    _setOverlayUiPrefsForTesting({ resourceViewMode: 'hand' });
+    showGameStateOverlay();
+    const overlay = getOverlay();
+
+    expect(overlay.querySelector('[data-player-hand="Alice"]')).toBeNull();
+    expect(overlay.querySelector('[data-player-hand="Bob"]')).toBeTruthy();
+  });
+
+  it('leaves your own row out of the table view too', () => {
+    _setOverlayUiPrefsForTesting({ resourceViewMode: 'table' });
+    showGameStateOverlay();
+    const overlay = getOverlay();
+
+    const rows = Array.from(overlay.querySelectorAll('tbody tr'));
+    const rowNames = rows.map(r => r.textContent);
+    expect(rowNames.some(t => t?.includes('Alice'))).toBe(false);
+    expect(rowNames.some(t => t?.includes('Bob'))).toBe(true);
+  });
+});
+
 describe('overlay dice chart collapse', () => {
   beforeEach(() => {
     document.body.innerHTML = '';
     resetGameState();
     _resetOverlayForTesting();
+    // The dice chart lives inside the "More stats" block, which starts
+    // collapsed — open it so these tests can see the chart itself.
+    _setOverlayUiPrefsForTesting({ moreStatsCollapsed: false });
     (globalThis as any).chrome = { runtime: { getURL: (p: string) => p } };
 
     placeSettlement('Alice');
@@ -227,6 +267,7 @@ describe('overlay unresolved-steals display', () => {
     document.body.innerHTML = '';
     resetGameState();
     _resetOverlayForTesting();
+    _setOverlayUiPrefsForTesting({ moreStatsCollapsed: false });
     (globalThis as any).chrome = { runtime: { getURL: (p: string) => p } };
 
     placeSettlement('Aaren');
@@ -297,6 +338,7 @@ describe('overlay development cards collapse', () => {
     document.body.innerHTML = '';
     resetGameState();
     _resetOverlayForTesting();
+    _setOverlayUiPrefsForTesting({ moreStatsCollapsed: false });
     (globalThis as any).chrome = { runtime: { getURL: (p: string) => p } };
 
     placeSettlement('Alice');
@@ -330,6 +372,7 @@ describe('overlay blocked-dice collapse', () => {
     document.body.innerHTML = '';
     resetGameState();
     _resetOverlayForTesting();
+    _setOverlayUiPrefsForTesting({ moreStatsCollapsed: false });
     (globalThis as any).chrome = { runtime: { getURL: (p: string) => p } };
 
     placeSettlement('Alice');
@@ -358,7 +401,7 @@ describe('overlay blocked-dice collapse', () => {
   });
 });
 
-describe('overlay collapse-all control', () => {
+describe('overlay "More stats" block', () => {
   beforeEach(() => {
     document.body.innerHTML = '';
     resetGameState();
@@ -375,42 +418,56 @@ describe('overlay collapse-all control', () => {
     game.blockedDiceRolls = { 9: { ore: 1 } };
   });
 
-  it('sits above Unresolved Steals and collapses every section at once', () => {
+  it('starts collapsed, hiding every section (including their headers) behind a single "More stats" button', () => {
     showGameStateOverlay();
-    let overlay = getOverlay();
+    const overlay = getOverlay();
 
-    const btn = overlay.querySelector('#collapse-all-btn') as HTMLElement;
+    const btn = overlay.querySelector('#more-stats-btn') as HTMLElement;
     expect(btn).toBeTruthy();
-    expect(btn.textContent).toContain('Collapse all');
+    expect(btn.textContent).toContain('More stats');
 
-    // It renders before the Unresolved Steals section in the markup.
-    const html = overlay.innerHTML;
-    expect(html.indexOf('collapse-all-btn')).toBeLessThan(
-      html.indexOf('unknown-transactions-header')
-    );
-
-    btn.click();
-    overlay = getOverlay();
-
+    // Not just the section bodies — the headers themselves aren't rendered.
+    expect(overlay.querySelector('#unknown-transactions-header')).toBeNull();
+    expect(overlay.querySelector('#dev-cards-header')).toBeNull();
+    expect(overlay.querySelector('#dice-chart-header')).toBeNull();
+    expect(overlay.querySelector('#blocked-dice-header')).toBeNull();
     expect(overlay.querySelector('.unknown-transaction-item')).toBeNull();
     expect(overlay.textContent).not.toContain('Knight');
     expect(overlay.textContent).not.toContain('9 ore: 1');
-    ['#unknown-transactions-header', '#dev-cards-header', '#dice-chart-header', '#blocked-dice-header']
-      .forEach(sel => {
-        expect(
-          (overlay.querySelector(sel) as HTMLElement).textContent
-        ).toContain('▸');
-      });
+  });
 
-    const collapsedBtn = overlay.querySelector(
-      '#collapse-all-btn'
-    ) as HTMLElement;
-    expect(collapsedBtn.textContent).toContain('Expand all');
+  it('reveals every section when clicked, each still independently collapsible, and hides them all again on a second click', () => {
+    showGameStateOverlay();
+    let overlay = getOverlay();
 
-    collapsedBtn.click();
+    (overlay.querySelector('#more-stats-btn') as HTMLElement).click();
     overlay = getOverlay();
+
+    const btn = overlay.querySelector('#more-stats-btn') as HTMLElement;
+    expect(btn.textContent).toContain('Collapse all');
+    // It renders before the Unresolved Steals section in the markup.
+    const html = overlay.innerHTML;
+    expect(html.indexOf('more-stats-btn')).toBeLessThan(
+      html.indexOf('unknown-transactions-header')
+    );
+
     expect(overlay.querySelector('.unknown-transaction-item')).toBeTruthy();
     expect(overlay.textContent).toContain('Knight');
     expect(overlay.textContent).toContain('9 ore: 1');
+
+    // Each section is still individually collapsible while the block is open.
+    (overlay.querySelector('#dev-cards-header') as HTMLElement).click();
+    overlay = getOverlay();
+    expect(overlay.textContent).not.toContain('Knight');
+    expect(overlay.querySelector('#dev-cards-header')).toBeTruthy();
+
+    // Collapsing the whole block again hides everything, headers included.
+    (overlay.querySelector('#more-stats-btn') as HTMLElement).click();
+    overlay = getOverlay();
+    expect(overlay.querySelector('#more-stats-btn')!.textContent).toContain(
+      'More stats'
+    );
+    expect(overlay.querySelector('#dev-cards-header')).toBeNull();
+    expect(overlay.querySelector('#dice-chart-header')).toBeNull();
   });
 });
