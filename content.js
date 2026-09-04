@@ -1356,10 +1356,26 @@
             return this.transactionProcessor.getPlayerResourceUncertainty(playerName);
         }
         /**
-         * Get resource probabilities for a player
-         * Returns minimum guaranteed resources and probability of additional resources
+         * Get resource probabilities for a player.
+         *
+         * Returns the minimum guaranteed count per resource, plus two views of the
+         * uncertainty above that minimum:
+         *  - `additionalResourceProbabilities`: a single blended P(more than the
+         *    minimum) per resource — kept for callers that only need a yes/no
+         *    signal (e.g. gameActions' "which resources could this victim hold"
+         *    check).
+         *  - `additionalResourceProbabilitySteps`: the full ladder behind that
+         *    number — step[0] is P(at least minimum+1), step[1] is P(at least
+         *    minimum+2), and so on. A single stacked steal only ever needs step
+         *    0, but several unresolved steals landing on the same player can
+         *    genuinely spread their hand across more than one extra card per
+         *    resource; collapsing that into one blended probability silently hides
+         *    how much of it is "probably +1" versus "possibly +2 or more" — this
+         *    ladder is what lets the UI show that as multiple graduated cards
+         *    instead of one misleadingly-confident badge.
          */
         getPlayerResourceProbabilities(playerName) {
+            var _a;
             const variants = this.variantTree.getCurrentVariants();
             if (variants.length === 0) {
                 // No variants - return all zeros
@@ -1373,6 +1389,13 @@
                 return {
                     minimumResources: Object.assign({}, emptyResources),
                     additionalResourceProbabilities: Object.assign({}, emptyResources),
+                    additionalResourceProbabilitySteps: {
+                        tree: [],
+                        brick: [],
+                        sheep: [],
+                        wheat: [],
+                        ore: [],
+                    },
                 };
             }
             // Calculate minimum resources across all variants
@@ -1412,19 +1435,37 @@
                 wheat: 0,
                 ore: 0,
             };
+            const additionalResourceProbabilitySteps = {
+                tree: [],
+                brick: [],
+                sheep: [],
+                wheat: [],
+                ore: [],
+            };
             for (const resourceType of RESOURCE_TYPES) {
                 const minCount = minimumResources[resourceType];
-                let probabilityOfMore = 0;
-                for (const { resources, probability } of resourceCounts) {
-                    if (resources[resourceType] > minCount) {
-                        probabilityOfMore += probability;
+                const maxCount = resourceCounts.reduce((max, { resources }) => Math.max(max, resources[resourceType]), minCount);
+                // steps[i] = P(count >= minCount + i + 1), i.e. the probability of
+                // having reached at least the (i+1)th card beyond the guaranteed
+                // minimum. steps[0] is exactly the old single-number
+                // additionalResourceProbabilities value.
+                const steps = [];
+                for (let atLeast = minCount + 1; atLeast <= maxCount; atLeast++) {
+                    let probabilityAtLeast = 0;
+                    for (const { resources, probability } of resourceCounts) {
+                        if (resources[resourceType] >= atLeast) {
+                            probabilityAtLeast += probability;
+                        }
                     }
+                    steps.push(probabilityAtLeast);
                 }
-                additionalResourceProbabilities[resourceType] = probabilityOfMore;
+                additionalResourceProbabilitySteps[resourceType] = steps;
+                additionalResourceProbabilities[resourceType] = (_a = steps[0]) !== null && _a !== void 0 ? _a : 0;
             }
             return {
                 minimumResources,
                 additionalResourceProbabilities,
+                additionalResourceProbabilitySteps,
             };
         }
         /**
@@ -2211,12 +2252,18 @@
             resourceNames.forEach((resource, index) => {
                 const resourceKey = resource;
                 const minCount = probabilities.minimumResources[resourceKey];
-                const additionalProb = probabilities.additionalResourceProbabilities[resourceKey];
-                // Format: "minimum + probability%"
+                const steps = probabilities.additionalResourceProbabilitySteps[resourceKey];
+                // Format: "minimum +step1% +step2% ..." — usually just one extra
+                // badge, but several unresolved steals landing on the same player can
+                // spread their hand across more than one card of the same resource,
+                // so each rung of the probability ladder gets its own badge instead
+                // of being folded into a single misleadingly-confident number.
                 let displayText = minCount.toString();
-                if (additionalProb > 0) {
-                    displayText += ` <span style="color:rgb(47, 120, 23); font-size: 10px;">+${additionalProb.toFixed(2)}</span>`;
-                }
+                steps.forEach(stepProbability => {
+                    if (stepProbability > 0) {
+                        displayText += ` <span style="color:rgb(47, 120, 23); font-size: 10px;">+${stepProbability.toFixed(2)}</span>`;
+                    }
+                });
                 table += `<td style="padding: 8px; border: 1px solid #ddd; text-align: center; width: 65px;background: ${resourceColors[index]}; font-weight: bold;">
         ${displayText}
       </td>`;
@@ -2235,23 +2282,33 @@
     const HAND_CARD_OVERLAP_PX = 32;
     /**
      * Render one resource card. A guaranteed card is opaque with a solid border;
-     * an "additional" card (the single blended probability of holding more than
-     * the guaranteed minimum, see getPlayerResourceProbabilities) is drawn with a
-     * dashed border, a probability badge, and a white wash over the art — so
-     * uncertainty reads as "faded ink", not see-through. The card itself stays
-     * fully opaque (`opacity` is never touched) so it still fully occludes
-     * whatever it's stacked on top of; a genuinely transparent card would let a
-     * card behind it bleed through at the overlap.
+     * an "additional" card — one rung of the additionalResourceProbabilitySteps
+     * ladder from getPlayerResourceProbabilities, i.e. the probability of
+     * holding at least `atLeast` more than the guaranteed minimum — is drawn
+     * with a dashed border, a probability badge, and a white wash over the art
+     * so uncertainty reads as "faded ink", not see-through. The card itself
+     * stays fully opaque (`opacity` is never touched) so it still fully
+     * occludes whatever it's stacked on top of; a genuinely transparent card
+     * would let a card behind it bleed through at the overlap.
+     *
+     * A resource can carry more than one of these — e.g. "88% chance of at
+     * least 1 more" AND "25% chance of at least 2 more" — once several
+     * unresolved steals have landed on the same player and spread their hand
+     * further than a single extra card. Each rung renders as its own stacked
+     * card via a separate createHandCardHtml call, `atLeast` only changes the
+     * card's tooltip.
      *
      * `stackOnPrevious` pulls this card left to overlap the one before it in the
      * same resource group. Later cards paint over earlier ones in normal flow,
      * so the last (front) card of a group is always the fully visible one —
-     * which is why the uncertain card, pushed last, ends up on top.
+     * which is why the least-certain rung, pushed last, ends up on top.
      */
     function createHandCardHtml(resource, options) {
+        var _a;
         const iconUrl = getResourceIconUrl(resource);
         const probability = options === null || options === void 0 ? void 0 : options.probability;
         const isUncertain = probability !== undefined;
+        const atLeast = (_a = options === null || options === void 0 ? void 0 : options.atLeast) !== null && _a !== void 0 ? _a : 1;
         // Whiten more heavily at low probability, tapering off as probability
         // rises (mirrors the old opacity curve, just as an opaque wash instead of
         // true transparency: floor ~10% wash near-certain, ~65% wash near-zero).
@@ -2278,7 +2335,7 @@
       ">${Math.round(probability * 100)}%</span>`
             : '';
         const title = isUncertain
-            ? `Maybe ${formatResourceName(resource)} (${Math.round(probability * 100)}% chance of one more)`
+            ? `Maybe ${formatResourceName(resource)} (${Math.round(probability * 100)}% chance of at least ${atLeast} more)`
             : formatResourceName(resource);
         const overlapStyle = (options === null || options === void 0 ? void 0 : options.stackOnPrevious)
             ? `margin-left: -${HAND_CARD_OVERLAP_PX}px;`
@@ -2307,8 +2364,8 @@
      * Alternative to generateResourceProbabilityTable(): renders each player's
      * resources as a row of cards (colonist's own hand tray, reusing the same
      * card art) instead of a numeric table. Uses the exact same underlying data
-     * (minimumResources / additionalResourceProbabilities) so the two views never
-     * disagree — only the presentation differs.
+     * (minimumResources / additionalResourceProbabilitySteps) so the two views
+     * never disagree — only the presentation differs.
      */
     function generateResourceHandView() {
         if (!game.probableGameState || game.players.length === 0) {
@@ -2322,20 +2379,28 @@
             let knownTotal = 0;
             resourceNames.forEach(resource => {
                 const minCount = probabilities.minimumResources[resource];
-                const additionalProb = probabilities.additionalResourceProbabilities[resource];
+                const steps = probabilities.additionalResourceProbabilitySteps[resource];
                 knownTotal += minCount;
                 for (let i = 0; i < minCount; i++) {
                     cards.push(createHandCardHtml(resource, { stackOnPrevious: i > 0 }));
                 }
-                if (additionalProb > 0) {
+                // One card per rung of the ladder — usually just one ("probably 1
+                // more"), but several unresolved steals landing on the same player
+                // can genuinely spread their hand across more than one extra card of
+                // the same resource, and each rung gets its own fading, lower-odds
+                // card instead of being folded into the first one.
+                steps.forEach((stepProbability, index) => {
+                    if (stepProbability <= 0)
+                        return;
                     cards.push(createHandCardHtml(resource, {
-                        probability: additionalProb,
-                        // Only the very first card of a group (this one, if it's the
-                        // only card) sits flush; otherwise it fans out on top of the
-                        // guaranteed cards ahead of it, becoming the visible "front" card.
-                        stackOnPrevious: minCount > 0,
+                        probability: stepProbability,
+                        atLeast: index + 1,
+                        // Only the very first card of a group (no guaranteed cards and
+                        // this is also the first rung) sits flush; every other card
+                        // fans out on top of whatever came before it in the group.
+                        stackOnPrevious: minCount > 0 || index > 0,
                     }));
-                }
+                });
             });
             html += `
       <div data-player-hand="${player.name}" style="
@@ -2701,8 +2766,8 @@
             ? generateResourceHandView()
             : generateResourceProbabilityTable();
         const resourceCaption = uiPrefs.resourceViewMode === 'hand'
-            ? 'Solid cards are guaranteed; whitened dashed cards show the chance of one more.'
-            : 'Numbers shown are guaranteed resources, additional resources are shown as a probability';
+            ? 'Solid cards are guaranteed; each whitened dashed card shows the chance of having at least that many more.'
+            : 'Numbers shown are guaranteed resources; each extra number is the probability of having at least that many more';
         const moreStats = uiPrefs.moreStatsCollapsed
             ? ''
             : `

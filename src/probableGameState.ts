@@ -520,12 +520,28 @@ export class PropbableGameState {
   }
 
   /**
-   * Get resource probabilities for a player
-   * Returns minimum guaranteed resources and probability of additional resources
+   * Get resource probabilities for a player.
+   *
+   * Returns the minimum guaranteed count per resource, plus two views of the
+   * uncertainty above that minimum:
+   *  - `additionalResourceProbabilities`: a single blended P(more than the
+   *    minimum) per resource — kept for callers that only need a yes/no
+   *    signal (e.g. gameActions' "which resources could this victim hold"
+   *    check).
+   *  - `additionalResourceProbabilitySteps`: the full ladder behind that
+   *    number — step[0] is P(at least minimum+1), step[1] is P(at least
+   *    minimum+2), and so on. A single stacked steal only ever needs step
+   *    0, but several unresolved steals landing on the same player can
+   *    genuinely spread their hand across more than one extra card per
+   *    resource; collapsing that into one blended probability silently hides
+   *    how much of it is "probably +1" versus "possibly +2 or more" — this
+   *    ladder is what lets the UI show that as multiple graduated cards
+   *    instead of one misleadingly-confident badge.
    */
   getPlayerResourceProbabilities(playerName: string): {
     minimumResources: ResourceObjectType;
     additionalResourceProbabilities: ResourceObjectType;
+    additionalResourceProbabilitySteps: { [K in keyof ResourceObjectType]: number[] };
   } {
     const variants = this.variantTree.getCurrentVariants();
 
@@ -541,6 +557,13 @@ export class PropbableGameState {
       return {
         minimumResources: { ...emptyResources },
         additionalResourceProbabilities: { ...emptyResources },
+        additionalResourceProbabilitySteps: {
+          tree: [],
+          brick: [],
+          sheep: [],
+          wheat: [],
+          ore: [],
+        },
       };
     }
 
@@ -592,23 +615,46 @@ export class PropbableGameState {
       wheat: 0,
       ore: 0,
     };
+    const additionalResourceProbabilitySteps: {
+      [K in keyof ResourceObjectType]: number[];
+    } = {
+      tree: [],
+      brick: [],
+      sheep: [],
+      wheat: [],
+      ore: [],
+    };
 
     for (const resourceType of RESOURCE_TYPES) {
       const minCount = minimumResources[resourceType];
-      let probabilityOfMore = 0;
+      const maxCount = resourceCounts.reduce(
+        (max, { resources }) => Math.max(max, resources[resourceType]),
+        minCount
+      );
 
-      for (const { resources, probability } of resourceCounts) {
-        if (resources[resourceType] > minCount) {
-          probabilityOfMore += probability;
+      // steps[i] = P(count >= minCount + i + 1), i.e. the probability of
+      // having reached at least the (i+1)th card beyond the guaranteed
+      // minimum. steps[0] is exactly the old single-number
+      // additionalResourceProbabilities value.
+      const steps: number[] = [];
+      for (let atLeast = minCount + 1; atLeast <= maxCount; atLeast++) {
+        let probabilityAtLeast = 0;
+        for (const { resources, probability } of resourceCounts) {
+          if (resources[resourceType] >= atLeast) {
+            probabilityAtLeast += probability;
+          }
         }
+        steps.push(probabilityAtLeast);
       }
 
-      additionalResourceProbabilities[resourceType] = probabilityOfMore;
+      additionalResourceProbabilitySteps[resourceType] = steps;
+      additionalResourceProbabilities[resourceType] = steps[0] ?? 0;
     }
 
     return {
       minimumResources,
       additionalResourceProbabilities,
+      additionalResourceProbabilitySteps,
     };
   }
 

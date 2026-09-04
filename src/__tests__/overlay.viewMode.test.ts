@@ -214,6 +214,92 @@ describe('overlay resource views exclude your own hand', () => {
   });
 });
 
+describe('overlay resource views after stacked unresolved steals', () => {
+  // Reproduces the exact scenario reported during manual testing: several
+  // unresolved (unknown-resource) steals land back to back with no
+  // resolving chat message in between, spreading a player's uncertainty for
+  // one resource across more than a single extra card. Both views must
+  // render one card/badge per rung of that ladder instead of folding it all
+  // into a single misleadingly-confident number (see
+  // stackedSteals.probabilities.test.ts for the underlying math).
+  beforeEach(() => {
+    document.body.innerHTML = '';
+    resetGameState();
+    _resetOverlayForTesting();
+    (globalThis as any).chrome = { runtime: { getURL: (p: string) => p } };
+
+    placeSettlement('Alice');
+    placeSettlement('Bob');
+    placeSettlement('Carol');
+    game.probableGameState = new PropbableGameState(game.players);
+    playerGetResources('Alice', { tree: 2, brick: 1, sheep: 1 });
+    playerGetResources('Bob', { wheat: 2, ore: 1, sheep: 1 });
+    playerGetResources('Carol', { brick: 2, tree: 1, ore: 1 });
+    game.hasRolledFirstDice = true;
+
+    unknownSteal('Alice', 'Bob');
+    unknownSteal('Bob', 'Carol');
+    unknownSteal('Carol', 'Alice');
+    unknownSteal('Alice', 'Bob');
+  });
+
+  it('renders more than one "maybe" wheat card for Bob in the hand view', () => {
+    _setOverlayUiPrefsForTesting({ resourceViewMode: 'hand' });
+    showGameStateOverlay();
+    const overlay = getOverlay();
+
+    const bobRow = overlay.querySelector('[data-player-hand="Bob"]')!;
+    const wheatCards = Array.from(
+      bobRow.querySelectorAll<HTMLElement>('.hand-card')
+    ).filter(c => c.querySelector('img')?.getAttribute('alt') === 'wheat');
+
+    // 0 guaranteed + two uncertain rungs (~88% and ~25%) = 2 dashed cards,
+    // not 1 — the old code could only ever render one.
+    const uncertainWheatCards = wheatCards.filter(c =>
+      (c.getAttribute('style') || '').includes('dashed')
+    );
+    expect(uncertainWheatCards).toHaveLength(2);
+
+    const badges = uncertainWheatCards.map(
+      c => c.querySelector('span')?.textContent
+    );
+    expect(badges.some(b => b === '87%' || b === '88%')).toBe(true);
+    expect(badges).toContain('25%');
+
+    // The two cards' tooltips distinguish "at least 1" from "at least 2" —
+    // a user hovering can tell these apart instead of seeing two identical
+    // "one more" cards.
+    const titles = uncertainWheatCards.map(c => c.getAttribute('title'));
+    expect(titles.some(t => t?.includes('at least 1 more'))).toBe(true);
+    expect(titles.some(t => t?.includes('at least 2 more'))).toBe(true);
+  });
+
+  it('renders more than one probability badge for Bob\'s wheat cell in the table view', () => {
+    _setOverlayUiPrefsForTesting({ resourceViewMode: 'table' });
+    showGameStateOverlay();
+    const overlay = getOverlay();
+
+    const rows = Array.from(overlay.querySelectorAll('tbody tr'));
+    const bobRow = rows.find(r => r.textContent?.includes('Bob'))!;
+    const wheatCellIndex = ['tree', 'brick', 'sheep', 'wheat', 'ore'].indexOf(
+      'wheat'
+    );
+    // +1 for the player-name column preceding the resource columns.
+    const wheatCell = bobRow.querySelectorAll('td')[wheatCellIndex + 1];
+
+    const badgeTexts = Array.from(wheatCell.querySelectorAll('span')).map(
+      s => s.textContent
+    );
+    expect(badgeTexts).toHaveLength(2);
+    expect(badgeTexts).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/^\+0\.88$|^\+0\.87/),
+        expect.stringMatching(/^\+0\.25/),
+      ])
+    );
+  });
+});
+
 describe('overlay dice chart collapse', () => {
   beforeEach(() => {
     document.body.innerHTML = '';
