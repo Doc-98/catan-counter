@@ -1661,7 +1661,7 @@
     let currentLog = null;
     const seenIndices = new Set();
     let persistTimer = null;
-    function storageAvailable() {
+    function storageAvailable$1() {
         var _a;
         return typeof chrome !== 'undefined' && !!((_a = chrome === null || chrome === void 0 ? void 0 : chrome.storage) === null || _a === void 0 ? void 0 : _a.local);
     }
@@ -1689,7 +1689,7 @@
                 messages: [],
             };
             seenIndices.clear();
-            if (!storageAvailable())
+            if (!storageAvailable$1())
                 return;
             try {
                 const key = STORAGE_KEY_PREFIX + gameId;
@@ -1739,7 +1739,7 @@
         log.messages.sort((a, b) => a.index - b.index);
     }
     function schedulePersist() {
-        if (!storageAvailable())
+        if (!storageAvailable$1())
             return;
         if (persistTimer !== null)
             clearTimeout(persistTimer);
@@ -1750,7 +1750,7 @@
     }
     function persistCurrentLog() {
         return __awaiter(this, void 0, void 0, function* () {
-            if (!currentLog || !storageAvailable())
+            if (!currentLog || !storageAvailable$1())
                 return;
             snapshotMetadata(currentLog);
             try {
@@ -1799,7 +1799,7 @@
      */
     function exportAllGameLogs() {
         return __awaiter(this, void 0, void 0, function* () {
-            if (!storageAvailable()) {
+            if (!storageAvailable$1()) {
                 console.warn('📼 chrome.storage is not available');
                 return [];
             }
@@ -1940,16 +1940,6 @@
         button.addEventListener('click', onClick);
         return button;
     }
-    /**
-     * Format probability text from resource probabilities
-     */
-    function formatProbabilityText(resourceProbabilities) {
-        return Object.entries(resourceProbabilities)
-            .filter(([_, probability]) => probability > 0)
-            .sort(([_, a], [__, b]) => b - a)
-            .map(([resource, probability]) => `${resource}: ${probability.toFixed(2)}`)
-            .join(', ');
-    }
     // =============================================================================
     // MAIN OVERLAY FUNCTIONALITY
     // =============================================================================
@@ -1964,6 +1954,111 @@
     // True while content.ts is scrolling the chat to rebuild history after a page
     // load/refresh. The overlay shows a loader instead of (stale/partial) counts.
     let isLoadingHistory = false;
+    let uiPrefs = {
+        resourceViewMode: 'table',
+        moreStatsCollapsed: true,
+        unknownTransactionsCollapsed: false,
+        devCardsCollapsed: false,
+        diceChartCollapsed: false,
+        blockedDiceCollapsed: false,
+    };
+    const UI_PREFS_STORAGE_KEY = 'catanOverlayUiPrefs';
+    function storageAvailable() {
+        var _a;
+        return typeof chrome !== 'undefined' && !!((_a = chrome === null || chrome === void 0 ? void 0 : chrome.storage) === null || _a === void 0 ? void 0 : _a.local);
+    }
+    /**
+     * Load persisted overlay UI preferences (if any) from chrome.storage.local
+     * and apply them. Safe to call before the overlay exists — prefs are just
+     * picked up the next time it renders. Call once on startup (see content.ts).
+     */
+    function initOverlayPreferences() {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!storageAvailable())
+                return;
+            try {
+                const stored = yield chrome.storage.local.get(UI_PREFS_STORAGE_KEY);
+                const saved = stored[UI_PREFS_STORAGE_KEY];
+                if (!saved)
+                    return;
+                if (saved.resourceViewMode === 'table' || saved.resourceViewMode === 'hand') {
+                    uiPrefs.resourceViewMode = saved.resourceViewMode;
+                }
+                if (typeof saved.moreStatsCollapsed === 'boolean') {
+                    uiPrefs.moreStatsCollapsed = saved.moreStatsCollapsed;
+                }
+                if (typeof saved.unknownTransactionsCollapsed === 'boolean') {
+                    uiPrefs.unknownTransactionsCollapsed = saved.unknownTransactionsCollapsed;
+                }
+                if (typeof saved.devCardsCollapsed === 'boolean') {
+                    uiPrefs.devCardsCollapsed = saved.devCardsCollapsed;
+                }
+                if (typeof saved.diceChartCollapsed === 'boolean') {
+                    uiPrefs.diceChartCollapsed = saved.diceChartCollapsed;
+                }
+                if (typeof saved.blockedDiceCollapsed === 'boolean') {
+                    uiPrefs.blockedDiceCollapsed = saved.blockedDiceCollapsed;
+                }
+                if (gameStateOverlay)
+                    updateOverlayContent(gameStateOverlay);
+            }
+            catch (error) {
+                console.warn('🃏 Could not load overlay UI preferences:', error);
+            }
+        });
+    }
+    function persistUiPrefs() {
+        if (!storageAvailable())
+            return;
+        void chrome.storage.local
+            .set({ [UI_PREFS_STORAGE_KEY]: uiPrefs })
+            .catch(error => {
+            console.warn('🃏 Could not persist overlay UI preferences:', error);
+        });
+    }
+    function toggleResourceViewMode() {
+        uiPrefs.resourceViewMode =
+            uiPrefs.resourceViewMode === 'table' ? 'hand' : 'table';
+        persistUiPrefs();
+        if (gameStateOverlay)
+            updateOverlayContent(gameStateOverlay);
+    }
+    function toggleUnknownTransactionsCollapsed() {
+        uiPrefs.unknownTransactionsCollapsed = !uiPrefs.unknownTransactionsCollapsed;
+        persistUiPrefs();
+        if (gameStateOverlay)
+            updateOverlayContent(gameStateOverlay);
+    }
+    function toggleDevCardsCollapsed() {
+        uiPrefs.devCardsCollapsed = !uiPrefs.devCardsCollapsed;
+        persistUiPrefs();
+        if (gameStateOverlay)
+            updateOverlayContent(gameStateOverlay);
+    }
+    function toggleDiceChartCollapsed() {
+        uiPrefs.diceChartCollapsed = !uiPrefs.diceChartCollapsed;
+        persistUiPrefs();
+        if (gameStateOverlay)
+            updateOverlayContent(gameStateOverlay);
+    }
+    function toggleBlockedDiceCollapsed() {
+        uiPrefs.blockedDiceCollapsed = !uiPrefs.blockedDiceCollapsed;
+        persistUiPrefs();
+        if (gameStateOverlay)
+            updateOverlayContent(gameStateOverlay);
+    }
+    /**
+     * Toggle the "More stats" block — Unresolved Steals, Development Cards,
+     * Dice Roll Frequency, and Blocked by Robber all live inside it. Unlike
+     * each section's own collapse (which still shows its header), this hides
+     * the entire block, headers included, down to just the toggle button.
+     */
+    function toggleMoreStatsCollapsed() {
+        uiPrefs.moreStatsCollapsed = !uiPrefs.moreStatsCollapsed;
+        persistUiPrefs();
+        if (gameStateOverlay)
+            updateOverlayContent(gameStateOverlay);
+    }
     function createGameStateOverlay() {
         const overlay = document.createElement('div');
         overlay.id = 'catan-game-state-overlay';
@@ -1972,13 +2067,15 @@
     top: 20px;
     right: 20px;
     width: 450px;
-    max-height: 1000px;
+    max-height: calc(100vh - 40px);
     background: white;
     border: 2px solid #333;
     border-radius: 8px;
     font-family: Arial, sans-serif;
     font-size: 12px;
-    overflow: visible;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
     z-index: 10000;
     box-shadow: 0 4px 8px rgba(0,0,0,0.3);
     color: black;
@@ -2012,7 +2109,8 @@
         const header = gameStateOverlay.querySelector('#overlay-header');
         if (!(header === null || header === void 0 ? void 0 : header.contains(target)) ||
             target.id === 'minimize-btn' ||
-            target.id === 'save-log-btn')
+            target.id === 'save-log-btn' ||
+            target.id === 'view-toggle-btn')
             return;
         isDragging = true;
         const rect = gameStateOverlay.getBoundingClientRect();
@@ -2051,7 +2149,15 @@
         isDragging = false;
         isResizing = false;
     }
-    function getOrderedPlayers() {
+    /**
+     * Players other than you, in turn order starting with whoever goes right
+     * after you. Used by the resource views (table and hand) — your own hand
+     * is deliberately left out of both: you already know it card-for-card, so
+     * showing it back to you is just noise. The one thing it doesn't cover —
+     * what opponents might infer about your hand from what they've seen — isn't
+     * information you need either, so it's not worth the space.
+     */
+    function getOrderedOpponents() {
         if (!game.youPlayerName) {
             return game.players;
         }
@@ -2059,11 +2165,11 @@
         if (youPlayerIndex === -1) {
             return game.players;
         }
-        // Create ordered array: players after youPlayer, then players before youPlayer, then youPlayer
+        // Players after youPlayer, then players before youPlayer — youPlayer
+        // itself is excluded.
         const playersAfter = game.players.slice(youPlayerIndex + 1);
         const playersBefore = game.players.slice(0, youPlayerIndex);
-        const youPlayer = game.players[youPlayerIndex];
-        return [...playersAfter, ...playersBefore, youPlayer];
+        return [...playersAfter, ...playersBefore];
     }
     function generateResourceProbabilityTable() {
         if (!game.probableGameState || game.players.length === 0) {
@@ -2096,8 +2202,8 @@
     </th>`;
         });
         table += '</tr></thead><tbody>';
-        // Player rows - using ordered players with youPlayer last
-        const orderedPlayers = getOrderedPlayers();
+        // Player rows - opponents only, in turn order (your own hand is excluded)
+        const orderedPlayers = getOrderedOpponents();
         orderedPlayers.forEach(player => {
             const probabilities = game.probableGameState.getPlayerResourceProbabilities(player.name);
             table += '<tr>';
@@ -2120,7 +2226,185 @@
         table += '</tbody></table></div>';
         return table;
     }
+    const HAND_CARD_WIDTH = 40;
+    const HAND_CARD_HEIGHT = 56;
+    // How much of the previous same-resource card a following one covers, so a
+    // run of duplicates fans out like a real hand instead of sitting edge to
+    // edge. Only applied between cards of the same resource — the flex gap alone
+    // separates one resource group from the next (see generateResourceHandView).
+    const HAND_CARD_OVERLAP_PX = 32;
+    /**
+     * Render one resource card. A guaranteed card is opaque with a solid border;
+     * an "additional" card (the single blended probability of holding more than
+     * the guaranteed minimum, see getPlayerResourceProbabilities) is drawn with a
+     * dashed border, a probability badge, and a white wash over the art — so
+     * uncertainty reads as "faded ink", not see-through. The card itself stays
+     * fully opaque (`opacity` is never touched) so it still fully occludes
+     * whatever it's stacked on top of; a genuinely transparent card would let a
+     * card behind it bleed through at the overlap.
+     *
+     * `stackOnPrevious` pulls this card left to overlap the one before it in the
+     * same resource group. Later cards paint over earlier ones in normal flow,
+     * so the last (front) card of a group is always the fully visible one —
+     * which is why the uncertain card, pushed last, ends up on top.
+     */
+    function createHandCardHtml(resource, options) {
+        const iconUrl = getResourceIconUrl(resource);
+        const probability = options === null || options === void 0 ? void 0 : options.probability;
+        const isUncertain = probability !== undefined;
+        // Whiten more heavily at low probability, tapering off as probability
+        // rises (mirrors the old opacity curve, just as an opaque wash instead of
+        // true transparency: floor ~10% wash near-certain, ~65% wash near-zero).
+        const whitenAlpha = isUncertain ? 0.65 - 0.55 * probability : 0;
+        const whitenOverlay = isUncertain
+            ? `<div style="
+        position: absolute;
+        inset: 0;
+        background: rgba(255, 255, 255, ${whitenAlpha.toFixed(2)});
+      "></div>`
+            : '';
+        const badge = isUncertain
+            ? `<span style="
+        position: absolute;
+        bottom: 2px;
+        right: 2px;
+        background: rgba(255, 255, 255, 0.9);
+        color: #333;
+        font-size: 9px;
+        font-weight: bold;
+        line-height: 1.4;
+        padding: 0 3px;
+        border-radius: 3px;
+      ">${Math.round(probability * 100)}%</span>`
+            : '';
+        const title = isUncertain
+            ? `Maybe ${formatResourceName(resource)} (${Math.round(probability * 100)}% chance of one more)`
+            : formatResourceName(resource);
+        const overlapStyle = (options === null || options === void 0 ? void 0 : options.stackOnPrevious)
+            ? `margin-left: -${HAND_CARD_OVERLAP_PX}px;`
+            : '';
+        return `
+    <div class="hand-card" style="
+      position: relative;
+      width: ${HAND_CARD_WIDTH}px;
+      height: ${HAND_CARD_HEIGHT}px;
+      flex: 0 0 auto;
+      border-radius: 4px;
+      overflow: hidden;
+      border: ${isUncertain ? '2px dashed #d4a017' : '1px solid rgba(0,0,0,0.25)'};
+      box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+      background: white;
+      ${overlapStyle}
+    " title="${title}">
+      <img src="${iconUrl}" alt="${resource}"
+        style="width: 100%; height: 100%; object-fit: cover; display: block;" />
+      ${whitenOverlay}
+      ${badge}
+    </div>
+  `;
+    }
+    /**
+     * Alternative to generateResourceProbabilityTable(): renders each player's
+     * resources as a row of cards (colonist's own hand tray, reusing the same
+     * card art) instead of a numeric table. Uses the exact same underlying data
+     * (minimumResources / additionalResourceProbabilities) so the two views never
+     * disagree — only the presentation differs.
+     */
+    function generateResourceHandView() {
+        if (!game.probableGameState || game.players.length === 0) {
+            return '';
+        }
+        const resourceNames = ['tree', 'brick', 'sheep', 'wheat', 'ore'];
+        let html = '<div style="margin-top: 15px;"><h4 style="margin: 0 0 10px 0; text-align: center;">Resource Hands</h4>';
+        getOrderedOpponents().forEach(player => {
+            const probabilities = game.probableGameState.getPlayerResourceProbabilities(player.name);
+            const cards = [];
+            let knownTotal = 0;
+            resourceNames.forEach(resource => {
+                const minCount = probabilities.minimumResources[resource];
+                const additionalProb = probabilities.additionalResourceProbabilities[resource];
+                knownTotal += minCount;
+                for (let i = 0; i < minCount; i++) {
+                    cards.push(createHandCardHtml(resource, { stackOnPrevious: i > 0 }));
+                }
+                if (additionalProb > 0) {
+                    cards.push(createHandCardHtml(resource, {
+                        probability: additionalProb,
+                        // Only the very first card of a group (this one, if it's the
+                        // only card) sits flush; otherwise it fans out on top of the
+                        // guaranteed cards ahead of it, becoming the visible "front" card.
+                        stackOnPrevious: minCount > 0,
+                    }));
+                }
+            });
+            html += `
+      <div data-player-hand="${player.name}" style="
+        margin-bottom: 10px;
+        padding: 8px;
+        background: #f8f9fa;
+        border-radius: 6px;
+        border-left: 4px solid ${player.color};
+      ">
+        <div style="font-weight: bold; color: ${player.color}; margin-bottom: 6px;">
+          ${player.name}
+          <span style="font-weight: normal; color: #666; font-size: 10px;">(${knownTotal} known)</span>
+        </div>
+        <div style="display: flex; flex-wrap: wrap; gap: 4px;">
+          ${cards.length > 0 ? cards.join('') : '<span style="color: #999; font-size: 11px;">No cards</span>'}
+        </div>
+      </div>
+    `;
+        });
+        html += '</div>';
+        return html;
+    }
+    /**
+     * Clickable ▾/▸ header shared by every collapsible section below the
+     * resource view. `id` is the DOM id updateOverlayContent wires a click
+     * listener to; `label` is the header text (verb-prefixed for its tooltip:
+     * "Hide Development Cards" / "Show Development Cards").
+     */
+    function generateSectionHeader(id, label, collapsed, options) {
+        var _a;
+        const colorStyle = (options === null || options === void 0 ? void 0 : options.color) ? `color: ${options.color};` : '';
+        const fontSizeStyle = (options === null || options === void 0 ? void 0 : options.fontSize) ? `font-size: ${options.fontSize};` : '';
+        const marginBottom = collapsed ? 0 : ((_a = options === null || options === void 0 ? void 0 : options.expandedMarginBottom) !== null && _a !== void 0 ? _a : 10);
+        return `<h4
+    id="${id}"
+    style="margin: 0 0 ${marginBottom}px 0; ${colorStyle} ${fontSizeStyle} text-align: center; cursor: pointer; user-select: none;"
+    title="${collapsed ? 'Show' : 'Hide'} ${label}"
+  >${label} <span style="font-size: 10px; color: #999;">${collapsed ? '▸' : '▾'}</span></h4>`;
+    }
+    /**
+     * Toggle button for the "More stats" block — Unresolved Steals, Development
+     * Cards, Dice Roll Frequency, and Blocked by Robber all render as its
+     * children (see generateMainContent). Collapsed, none of them render at
+     * all — not even their headers, just this button reading "More stats".
+     * Expanded, it reads "Collapse all" and each child section is still
+     * independently collapsible via its own header.
+     */
+    function generateMoreStatsToggle() {
+        const collapsed = uiPrefs.moreStatsCollapsed;
+        return `
+    <div style="display: flex; justify-content: center; margin: 12px 0 4px;">
+      <button
+        id="more-stats-btn"
+        style="
+          background: none;
+          border: 1px solid #ccc;
+          border-radius: 4px;
+          padding: 3px 10px;
+          font-size: 11px;
+          color: #555;
+          cursor: pointer;
+        "
+        title="${collapsed ? 'Show' : 'Hide'} Unresolved Steals, Development Cards, Dice Roll Frequency, and Blocked by Robber"
+      >${collapsed ? '▸ More stats' : '▾ Collapse all'}</button>
+    </div>
+  `;
+    }
     function generateDevCardsDisplay() {
+        const collapsed = uiPrefs.devCardsCollapsed;
         const devCardTypes = [
             { key: 'knights', name: 'Knight', icon: 'knight.svg' },
             { key: 'monopolies', name: 'Monopoly', icon: 'mono.svg' },
@@ -2133,66 +2417,78 @@
          */
         const getDevCardIconUrl = (icon) => chrome.runtime.getURL(`assets/${icon}`);
         let display = '<div style="margin: 15px 0;">';
-        display += `<h4 style="margin: 0 0 10px 0; text-align: center;">Development Cards Remaining: ${game.devCards}</h4>`;
-        display +=
-            '<div style="display: flex; justify-content: space-around; align-items: center; padding: 10px; background: #f8f9fa; border-radius: 6px; border: 1px solid #e9ecef;">';
-        devCardTypes.forEach(cardType => {
-            const remaining = game[cardType.key];
-            const total = cardType.key === 'knights'
-                ? 14
-                : cardType.key === 'victoryPoints'
-                    ? 5
-                    : 2;
-            display += `
-      <div style="display: flex; flex-direction: column; align-items: center; min-width: 60px;">
-        <div style="width: 32px; height: 40px; margin-bottom: 5px; display: flex; align-items: center; justify-content: center; background: white; border-radius: 4px; border: 1px solid #ddd;">
-          <img src="${getDevCardIconUrl(cardType.icon)}" 
-               style="width: 24px; height: 32px;" 
-               alt="${cardType.name}" 
-               title="${cardType.name}" />
+        display += generateSectionHeader('dev-cards-header', `Development Cards Remaining: ${game.devCards}`, collapsed);
+        if (!collapsed) {
+            display +=
+                '<div style="display: flex; justify-content: space-around; align-items: center; padding: 10px; background: #f8f9fa; border-radius: 6px; border: 1px solid #e9ecef;">';
+            devCardTypes.forEach(cardType => {
+                const remaining = game[cardType.key];
+                const total = cardType.key === 'knights'
+                    ? 14
+                    : cardType.key === 'victoryPoints'
+                        ? 5
+                        : 2;
+                display += `
+        <div style="display: flex; flex-direction: column; align-items: center; min-width: 60px;">
+          <div style="width: 32px; height: 40px; margin-bottom: 5px; display: flex; align-items: center; justify-content: center; background: white; border-radius: 4px; border: 1px solid #ddd;">
+            <img src="${getDevCardIconUrl(cardType.icon)}"
+                 style="width: 24px; height: 32px;"
+                 alt="${cardType.name}"
+                 title="${cardType.name}" />
+          </div>
+          <div style="font-size: 12px; font-weight: bold; color: #2c3e50;">
+            ${remaining}/${total}
+          </div>
+          <div style="font-size: 9px; color: #666; text-align: center; line-height: 1.1;">
+            ${cardType.name}
+          </div>
         </div>
-        <div style="font-size: 12px; font-weight: bold; color: #2c3e50;">
-          ${remaining}/${total}
-        </div>
-        <div style="font-size: 9px; color: #666; text-align: center; line-height: 1.1;">
-          ${cardType.name}
-        </div>
-      </div>
-    `;
-        });
-        display += '</div></div>';
+      `;
+            });
+            display += '</div>';
+        }
+        display += '</div>';
         return display;
     }
     function generateDiceChart() {
-        const maxRolls = Math.max(...Object.values(game.diceRolls), 1);
-        const chartHeight = 120;
-        let chart = '<div style="margin: 15px 0;"><h4 style="margin: 0 0 10px 0; text-align: center;">Dice Roll Frequency</h4>';
-        chart +=
-            '<div style="display: flex; align-items: end; justify-content: space-between; height: ' +
-                chartHeight +
-                'px; border-bottom: 2px solid #333; padding: 0 5px;">';
-        for (let i = 2; i <= 12; i++) {
-            const rolls = game.diceRolls[i];
-            const barHeight = maxRolls > 0 ? (rolls / maxRolls) * (chartHeight - 20) : 0;
-            const barColor = i === 7 ? '#ff6b6b' : i === 6 || i === 8 ? '#4ecdc4' : '#45b7d1';
-            chart += `
-      <div style="display: flex; flex-direction: column; align-items: center; min-width: 25px;">
-        <div style="font-size: 10px; font-weight: bold; margin-bottom: 2px;">${rolls}</div>
-        <div style="
-          width: 20px; 
-          height: ${barHeight}px; 
-          background: ${barColor}; 
-          border-radius: 2px 2px 0 0;
-          display: flex;
-          align-items: end;
-          justify-content: center;
-          margin-bottom: 2px;
-        "></div>
-        <div style="font-size: 10px; font-weight: bold;">${i}</div>
-      </div>
-    `;
+        const collapsed = uiPrefs.diceChartCollapsed;
+        // Clickable header, always shown — collapsing only hides the bars below it,
+        // so the chart never disappears entirely, just the space it takes up.
+        let chart = `
+    <div style="margin: 15px 0;">
+      ${generateSectionHeader('dice-chart-header', 'Dice Roll Frequency', collapsed)}
+  `;
+        if (!collapsed) {
+            const maxRolls = Math.max(...Object.values(game.diceRolls), 1);
+            const chartHeight = 120;
+            chart +=
+                '<div style="display: flex; align-items: end; justify-content: space-between; height: ' +
+                    chartHeight +
+                    'px; border-bottom: 2px solid #333; padding: 0 5px;">';
+            for (let i = 2; i <= 12; i++) {
+                const rolls = game.diceRolls[i];
+                const barHeight = maxRolls > 0 ? (rolls / maxRolls) * (chartHeight - 20) : 0;
+                const barColor = i === 7 ? '#ff6b6b' : i === 6 || i === 8 ? '#4ecdc4' : '#45b7d1';
+                chart += `
+        <div style="display: flex; flex-direction: column; align-items: center; min-width: 25px;">
+          <div style="font-size: 10px; font-weight: bold; margin-bottom: 2px;">${rolls}</div>
+          <div style="
+            width: 20px;
+            height: ${barHeight}px;
+            background: ${barColor};
+            border-radius: 2px 2px 0 0;
+            display: flex;
+            align-items: end;
+            justify-content: center;
+            margin-bottom: 2px;
+          "></div>
+          <div style="font-size: 10px; font-weight: bold;">${i}</div>
+        </div>
+      `;
+            }
+            chart += '</div>';
         }
-        chart += '</div></div>';
+        chart += '</div>';
         return chart;
     }
     function generateBlockedDiceDisplay() {
@@ -2201,35 +2497,71 @@
         if (!hasBlockedRolls) {
             return '';
         }
-        let display = '<div style="margin: 15px 0;"><h4 style="margin: 0 0 10px 0; text-align: center;">🔒 Blocked by Robber</h4>';
-        display +=
-            '<div style="background: #f8f9fa; padding: 10px; border-radius: 6px; font-size: 12px; line-height: 1.4;">';
-        // Collect all blocked entries
-        const blockedEntries = [];
-        Object.entries(game.blockedDiceRolls).forEach(([diceNumber, resources]) => {
-            Object.entries(resources).forEach(([resource, count]) => {
-                if (count > 0) {
-                    blockedEntries.push({
-                        number: parseInt(diceNumber),
-                        resource,
-                        count,
-                    });
-                }
+        const collapsed = uiPrefs.blockedDiceCollapsed;
+        let display = '<div style="margin: 15px 0;">';
+        display += generateSectionHeader('blocked-dice-header', '🔒 Blocked by Robber', collapsed);
+        if (!collapsed) {
+            display +=
+                '<div style="background: #f8f9fa; padding: 10px; border-radius: 6px; font-size: 12px; line-height: 1.4;">';
+            // Collect all blocked entries
+            const blockedEntries = [];
+            Object.entries(game.blockedDiceRolls).forEach(([diceNumber, resources]) => {
+                Object.entries(resources).forEach(([resource, count]) => {
+                    if (count > 0) {
+                        blockedEntries.push({
+                            number: parseInt(diceNumber),
+                            resource,
+                            count,
+                        });
+                    }
+                });
             });
-        });
-        // Sort by dice number, then by resource
-        blockedEntries.sort((a, b) => {
-            if (a.number !== b.number) {
-                return a.number - b.number;
-            }
-            return a.resource.localeCompare(b.resource);
-        });
-        // Generate the display text
-        const blockedTexts = blockedEntries.map(entry => `${entry.number} ${entry.resource}: ${entry.count}`);
-        display += blockedTexts.join('<br>');
-        display += '</div></div>';
+            // Sort by dice number, then by resource
+            blockedEntries.sort((a, b) => {
+                if (a.number !== b.number) {
+                    return a.number - b.number;
+                }
+                return a.resource.localeCompare(b.resource);
+            });
+            // Generate the display text
+            const blockedTexts = blockedEntries.map(entry => `${entry.number} ${entry.resource}: ${entry.count}`);
+            display += blockedTexts.join('<br>');
+            display += '</div>';
+        }
+        display += '</div>';
         return display;
     }
+    /**
+     * Small pill showing one candidate resource + its probability for an
+     * unresolved steal, using the same card art as the hand view instead of a
+     * text list ("brick: 0.67, wheat: 0.33") — a glance at the icons says what
+     * the words used to.
+     */
+    function createResourceProbabilityChip(resource, probability) {
+        return `
+    <span style="
+      display: inline-flex;
+      align-items: center;
+      gap: 2px;
+      background: white;
+      border: 1px solid #eee;
+      border-radius: 3px;
+      padding: 1px 4px;
+    " title="${formatResourceName(resource)}: ${Math.round(probability * 100)}%">
+      <img src="${getResourceIconUrl(resource)}" alt="${resource}"
+        style="width: 10px; height: 14px;" />
+      <span style="font-size: 10px; color: #555;">${Math.round(probability * 100)}%</span>
+    </span>
+  `;
+    }
+    /**
+     * Unresolved robber/knight steals where the stolen resource is still
+     * ambiguous. Each row leans on names, color, and icons instead of a
+     * sentence: "<Thief> 🦹⟵ <Victim>" reads as "thief took a card from victim"
+     * without spelling it out, and the candidate resources are icon chips
+     * (see createResourceProbabilityChip) rather than a "could be: x, y" list.
+     * Clicking a row still opens the same manual-resolution modal as before.
+     */
     function generateUnknownTransactionsDisplay() {
         const unresolvedTransactions = game.probableGameState
             .getUnknownTransactions()
@@ -2237,38 +2569,51 @@
         if (unresolvedTransactions.length === 0) {
             return '';
         }
-        let display = '<div style="margin: 15px 0; padding: 10px; background: #fff3cd; border: 1px solid #ffeaa7; border-radius: 6px;">';
-        display +=
-            '<h4 style="margin: 0 0 10px 0; color: #856404;">🔍 Unknown Transactions</h4>';
+        const playerColor = (name) => { var _a, _b; return (_b = (_a = game.players.find(p => p.name === name)) === null || _a === void 0 ? void 0 : _a.color) !== null && _b !== void 0 ? _b : '#333'; };
+        const collapsed = uiPrefs.unknownTransactionsCollapsed;
+        let display = '<div style="margin: 15px 0; padding: 8px; background: #fff3cd; border: 1px solid #ffeaa7; border-radius: 6px;">';
+        display += generateSectionHeader('unknown-transactions-header', '🎭 Unresolved Steals', collapsed, { color: '#856404', fontSize: '12px', expandedMarginBottom: 8 });
+        if (collapsed) {
+            display += '</div>';
+            return display;
+        }
         unresolvedTransactions.forEach(transaction => {
-            const timestamp = new Date(transaction.timestamp).toLocaleTimeString();
-            display += `<div 
-      class="unknown-transaction-item" 
+            const transactionResourceProbabilities = game.probableGameState.getTransactionResourceProbabilities(transaction.id);
+            const chips = transactionResourceProbabilities
+                ? Object.entries(transactionResourceProbabilities)
+                    .filter(([, probability]) => probability > 0)
+                    .sort(([, a], [, b]) => b - a)
+                    .map(([resource, probability]) => createResourceProbabilityChip(resource, probability))
+                    .join('')
+                : '';
+            display += `<div
+      class="unknown-transaction-item"
       data-transaction-id="${transaction.id}"
       style="
-        margin-bottom: 8px; 
-        padding: 8px; 
-        background: white; 
-        border-radius: 4px; 
-        font-size: 11px; 
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 6px;
+        padding: 6px 8px;
+        background: white;
+        border-radius: 4px;
+        font-size: 12px;
         cursor: pointer;
-        transition: background-color 0.2s ease;
         border: 1px solid transparent;
+        transition: border-color 0.2s ease;
       "
-      onmouseover="this.style.backgroundColor='#f8f9fa'; this.style.borderColor='#007bff';"
-      onmouseout="this.style.backgroundColor='white'; this.style.borderColor='transparent';"
-      title="Click to resolve this transaction"
-    >`;
-            display += `<strong>${transaction.thief}</strong> stole from <strong>${transaction.victim}</strong> `;
-            display += `<span style="color: #666;">(${timestamp})</span><br>`;
-            const transactionResourceProbabilities = game.probableGameState.getTransactionResourceProbabilities(transaction.id);
-            if (transactionResourceProbabilities) {
-                const probabilityText = formatProbabilityText(transactionResourceProbabilities);
-                if (probabilityText) {
-                    display += `<small style="color: #666;">Could be: ${probabilityText}</small>`;
-                }
-            }
-            display += '</div>';
+      onmouseover="this.style.borderColor='#007bff';"
+      onmouseout="this.style.borderColor='transparent';"
+      title="${transaction.thief} may have taken one of these from ${transaction.victim} — click to resolve"
+    >
+      <span style="white-space: nowrap;">
+        <strong style="color: ${playerColor(transaction.thief)};">${transaction.thief}</strong>
+        <span style="color: #999;">🦹⟵</span>
+        <strong style="color: ${playerColor(transaction.victim)};">${transaction.victim}</strong>
+      </span>
+      <span style="display: flex; gap: 3px; flex-wrap: wrap; justify-content: flex-end;">${chips}</span>
+    </div>`;
         });
         display += '</div>';
         return display;
@@ -2352,14 +2697,26 @@
         }
     }
     function generateMainContent() {
+        const resourceSection = uiPrefs.resourceViewMode === 'hand'
+            ? generateResourceHandView()
+            : generateResourceProbabilityTable();
+        const resourceCaption = uiPrefs.resourceViewMode === 'hand'
+            ? 'Solid cards are guaranteed; whitened dashed cards show the chance of one more.'
+            : 'Numbers shown are guaranteed resources, additional resources are shown as a probability';
+        const moreStats = uiPrefs.moreStatsCollapsed
+            ? ''
+            : `
+      ${generateUnknownTransactionsDisplay()}
+      ${generateDevCardsDisplay()}
+      <div style="font-size: 12px; color: #666; text-align: center; line-height: 1.1;">Cards in your hand are currently not counted</div>
+      ${generateDiceChart()}
+      ${generateBlockedDiceDisplay()}
+    `;
         return `
-    ${generateResourceProbabilityTable()}
-    <div style="font-size: 12px; color: #666; text-align: center; line-height: 1.1;">Numbers shown are guaranteed resources, additional resources are shown as a probability</div>
-    ${generateUnknownTransactionsDisplay()}
-    ${generateDevCardsDisplay()}
-    <div style="font-size: 12px; color: #666; text-align: center; line-height: 1.1;">Cards in your hand are currently not counted</div>
-    ${generateDiceChart()}
-    ${generateBlockedDiceDisplay()}
+    ${resourceSection}
+    <div style="font-size: 12px; color: #666; text-align: center; line-height: 1.1;">${resourceCaption}</div>
+    ${generateMoreStatsToggle()}
+    ${moreStats}
   `;
     }
     function generateLoadingContent() {
@@ -2418,18 +2775,28 @@
                 : generateWaitingContent();
         overlay.innerHTML = `
     <div id="overlay-header" style="
-      background: #2c3e50; 
-      color: white; 
-      padding: 10px; 
-      border-radius: 6px 6px ${isMinimized ? '6px 6px' : '0 0'}; 
-      display: flex; 
-      justify-content: space-between; 
+      background: #2c3e50;
+      color: white;
+      padding: 10px;
+      border-radius: 6px 6px ${isMinimized ? '6px 6px' : '0 0'};
+      display: flex;
+      justify-content: space-between;
       align-items: center;
       cursor: move;
       user-select: none;
+      flex: 0 0 auto;
     ">
       <div style="font-weight: bold;">🎲 Catan Counter</div>
       <div style="display: flex; align-items: center; gap: 2px;">
+        <button id="view-toggle-btn" style="
+          background: none;
+          border: none;
+          color: white;
+          cursor: pointer;
+          font-size: 14px;
+          padding: 2px 6px;
+          border-radius: 3px;
+        " title="${uiPrefs.resourceViewMode === 'table' ? 'Switch to Hand view' : 'Switch to Table view'}">${uiPrefs.resourceViewMode === 'table' ? '🃏' : '📋'}</button>
         <button id="save-log-btn" style="
           background: none;
           border: none;
@@ -2451,7 +2818,7 @@
       </div>
     </div>
     
-    <div id="overlay-content" style="display: ${contentDisplay}; padding: 15px; max-height: 800px; overflow-y: auto; position: relative;">
+    <div id="overlay-content" style="display: ${contentDisplay}; padding: 15px; flex: 1 1 auto; min-height: 0; overflow-y: auto; position: relative;">
       ${mainContent}
       <div class="resize-handle" style="
         position: absolute;
@@ -2471,6 +2838,47 @@
             minimizeBtn.addEventListener('click', e => {
                 e.stopPropagation(); // Prevent dragging when clicking minimize
                 toggleMinimize();
+            });
+        }
+        // Add view-toggle button functionality
+        const viewToggleBtn = overlay.querySelector('#view-toggle-btn');
+        if (viewToggleBtn) {
+            viewToggleBtn.addEventListener('click', e => {
+                e.stopPropagation(); // Prevent dragging when clicking the toggle
+                toggleResourceViewMode();
+            });
+        }
+        // Add collapse/expand functionality for each collapsible section
+        const diceChartHeader = overlay.querySelector('#dice-chart-header');
+        if (diceChartHeader) {
+            diceChartHeader.addEventListener('click', () => {
+                toggleDiceChartCollapsed();
+            });
+        }
+        const unknownTransactionsHeader = overlay.querySelector('#unknown-transactions-header');
+        if (unknownTransactionsHeader) {
+            unknownTransactionsHeader.addEventListener('click', () => {
+                toggleUnknownTransactionsCollapsed();
+            });
+        }
+        const devCardsHeader = overlay.querySelector('#dev-cards-header');
+        if (devCardsHeader) {
+            devCardsHeader.addEventListener('click', () => {
+                toggleDevCardsCollapsed();
+            });
+        }
+        const blockedDiceHeader = overlay.querySelector('#blocked-dice-header');
+        if (blockedDiceHeader) {
+            blockedDiceHeader.addEventListener('click', () => {
+                toggleBlockedDiceCollapsed();
+            });
+        }
+        // Add "More stats" block toggle functionality
+        const moreStatsBtn = overlay.querySelector('#more-stats-btn');
+        if (moreStatsBtn) {
+            moreStatsBtn.addEventListener('click', e => {
+                e.stopPropagation();
+                toggleMoreStatsCollapsed();
             });
         }
         // Add save-log button functionality
@@ -3500,6 +3908,11 @@
     window.__catanCounter = {
         exportAllGameLogs,
     };
+    // Load persisted overlay UI preferences (resource view mode, collapsed
+    // sections, ...) so the overlay renders the way the user last left it instead
+    // of always defaulting. Independent of chat detection, so this doesn't need
+    // to wait on it.
+    void initOverlayPreferences();
     // Start polling every 2 seconds
     const intervalId = window.setInterval(tryFindChat, 2000);
     // Optionally run immediately

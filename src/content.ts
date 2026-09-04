@@ -8,6 +8,7 @@ import {
   showGameStateOverlay,
   setHistoryLoading,
   updateGameStateDisplay,
+  initOverlayPreferences,
 } from './overlay.js';
 import { resetGameState, autoDetectCurrentPlayer } from './gameState.js';
 import {
@@ -244,6 +245,12 @@ function findAllChatMessages(): HTMLElement[] {
 (window as unknown as Record<string, unknown>).__catanCounter = {
   exportAllGameLogs,
 };
+
+// Load persisted overlay UI preferences (resource view mode, collapsed
+// sections, ...) so the overlay renders the way the user last left it instead
+// of always defaulting. Independent of chat detection, so this doesn't need
+// to wait on it.
+void initOverlayPreferences();
 
 // Start polling every 2 seconds
 const intervalId: number = window.setInterval(tryFindChat, 2000);
