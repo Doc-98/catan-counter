@@ -1956,7 +1956,10 @@
     let isLoadingHistory = false;
     let uiPrefs = {
         resourceViewMode: 'table',
+        unknownTransactionsCollapsed: false,
+        devCardsCollapsed: false,
         diceChartCollapsed: false,
+        blockedDiceCollapsed: false,
     };
     const UI_PREFS_STORAGE_KEY = 'catanOverlayUiPrefs';
     function storageAvailable() {
@@ -1980,8 +1983,17 @@
                 if (saved.resourceViewMode === 'table' || saved.resourceViewMode === 'hand') {
                     uiPrefs.resourceViewMode = saved.resourceViewMode;
                 }
+                if (typeof saved.unknownTransactionsCollapsed === 'boolean') {
+                    uiPrefs.unknownTransactionsCollapsed = saved.unknownTransactionsCollapsed;
+                }
+                if (typeof saved.devCardsCollapsed === 'boolean') {
+                    uiPrefs.devCardsCollapsed = saved.devCardsCollapsed;
+                }
                 if (typeof saved.diceChartCollapsed === 'boolean') {
                     uiPrefs.diceChartCollapsed = saved.diceChartCollapsed;
+                }
+                if (typeof saved.blockedDiceCollapsed === 'boolean') {
+                    uiPrefs.blockedDiceCollapsed = saved.blockedDiceCollapsed;
                 }
                 if (gameStateOverlay)
                     updateOverlayContent(gameStateOverlay);
@@ -2007,8 +2019,65 @@
         if (gameStateOverlay)
             updateOverlayContent(gameStateOverlay);
     }
+    function toggleUnknownTransactionsCollapsed() {
+        uiPrefs.unknownTransactionsCollapsed = !uiPrefs.unknownTransactionsCollapsed;
+        persistUiPrefs();
+        if (gameStateOverlay)
+            updateOverlayContent(gameStateOverlay);
+    }
+    function toggleDevCardsCollapsed() {
+        uiPrefs.devCardsCollapsed = !uiPrefs.devCardsCollapsed;
+        persistUiPrefs();
+        if (gameStateOverlay)
+            updateOverlayContent(gameStateOverlay);
+    }
     function toggleDiceChartCollapsed() {
         uiPrefs.diceChartCollapsed = !uiPrefs.diceChartCollapsed;
+        persistUiPrefs();
+        if (gameStateOverlay)
+            updateOverlayContent(gameStateOverlay);
+    }
+    function toggleBlockedDiceCollapsed() {
+        uiPrefs.blockedDiceCollapsed = !uiPrefs.blockedDiceCollapsed;
+        persistUiPrefs();
+        if (gameStateOverlay)
+            updateOverlayContent(gameStateOverlay);
+    }
+    /**
+     * Collapsed state of each section that currently has something to show —
+     * a section that isn't rendered (e.g. no unresolved steals) doesn't count
+     * either way, so the "collapse/expand all" button reflects only what's
+     * actually on screen.
+     */
+    function visibleSectionCollapsedStates() {
+        const hasUnknownTransactions = game.probableGameState
+            .getUnknownTransactions()
+            .filter(t => !t.isResolved).length > 0;
+        const hasBlockedRolls = Object.keys(game.blockedDiceRolls).length > 0;
+        const states = [uiPrefs.devCardsCollapsed, uiPrefs.diceChartCollapsed];
+        if (hasUnknownTransactions)
+            states.push(uiPrefs.unknownTransactionsCollapsed);
+        if (hasBlockedRolls)
+            states.push(uiPrefs.blockedDiceCollapsed);
+        return states;
+    }
+    function areAllSectionsCollapsed() {
+        const states = visibleSectionCollapsedStates();
+        return states.length > 0 && states.every(Boolean);
+    }
+    /**
+     * Bulk toggle for every collapsible section (Unresolved Steals, Development
+     * Cards, Dice Roll Frequency, Blocked by Robber). Collapses all of them
+     * unless they're already all collapsed, in which case it expands all of
+     * them — mirrors a single section's own toggle, just applied to every
+     * section at once.
+     */
+    function toggleCollapseAll() {
+        const collapse = !areAllSectionsCollapsed();
+        uiPrefs.unknownTransactionsCollapsed = collapse;
+        uiPrefs.devCardsCollapsed = collapse;
+        uiPrefs.diceChartCollapsed = collapse;
+        uiPrefs.blockedDiceCollapsed = collapse;
         persistUiPrefs();
         if (gameStateOverlay)
             updateOverlayContent(gameStateOverlay);
@@ -2304,7 +2373,51 @@
         html += '</div>';
         return html;
     }
+    /**
+     * Clickable ▾/▸ header shared by every collapsible section below the
+     * resource view. `id` is the DOM id updateOverlayContent wires a click
+     * listener to; `label` is the header text (verb-prefixed for its tooltip:
+     * "Hide Development Cards" / "Show Development Cards").
+     */
+    function generateSectionHeader(id, label, collapsed, options) {
+        var _a;
+        const colorStyle = (options === null || options === void 0 ? void 0 : options.color) ? `color: ${options.color};` : '';
+        const fontSizeStyle = (options === null || options === void 0 ? void 0 : options.fontSize) ? `font-size: ${options.fontSize};` : '';
+        const marginBottom = collapsed ? 0 : ((_a = options === null || options === void 0 ? void 0 : options.expandedMarginBottom) !== null && _a !== void 0 ? _a : 10);
+        return `<h4
+    id="${id}"
+    style="margin: 0 0 ${marginBottom}px 0; ${colorStyle} ${fontSizeStyle} text-align: center; cursor: pointer; user-select: none;"
+    title="${collapsed ? 'Show' : 'Hide'} ${label}"
+  >${label} <span style="font-size: 10px; color: #999;">${collapsed ? '▸' : '▾'}</span></h4>`;
+    }
+    /**
+     * Bulk-toggle button placed just above Unresolved Steals — the first
+     * collapsible section — collapsing or expanding every section below the
+     * resource view at once. Reflects the combined state of whatever sections
+     * are actually visible right now (see areAllSectionsCollapsed).
+     */
+    function generateCollapseAllControl() {
+        const allCollapsed = areAllSectionsCollapsed();
+        return `
+    <div style="display: flex; justify-content: center; margin: 12px 0 4px;">
+      <button
+        id="collapse-all-btn"
+        style="
+          background: none;
+          border: 1px solid #ccc;
+          border-radius: 4px;
+          padding: 3px 10px;
+          font-size: 11px;
+          color: #555;
+          cursor: pointer;
+        "
+        title="${allCollapsed ? 'Expand' : 'Collapse'} every section below"
+      >${allCollapsed ? '▸ Expand all' : '▾ Collapse all'}</button>
+    </div>
+  `;
+    }
     function generateDevCardsDisplay() {
+        const collapsed = uiPrefs.devCardsCollapsed;
         const devCardTypes = [
             { key: 'knights', name: 'Knight', icon: 'knight.svg' },
             { key: 'monopolies', name: 'Monopoly', icon: 'mono.svg' },
@@ -2317,34 +2430,37 @@
          */
         const getDevCardIconUrl = (icon) => chrome.runtime.getURL(`assets/${icon}`);
         let display = '<div style="margin: 15px 0;">';
-        display += `<h4 style="margin: 0 0 10px 0; text-align: center;">Development Cards Remaining: ${game.devCards}</h4>`;
-        display +=
-            '<div style="display: flex; justify-content: space-around; align-items: center; padding: 10px; background: #f8f9fa; border-radius: 6px; border: 1px solid #e9ecef;">';
-        devCardTypes.forEach(cardType => {
-            const remaining = game[cardType.key];
-            const total = cardType.key === 'knights'
-                ? 14
-                : cardType.key === 'victoryPoints'
-                    ? 5
-                    : 2;
-            display += `
-      <div style="display: flex; flex-direction: column; align-items: center; min-width: 60px;">
-        <div style="width: 32px; height: 40px; margin-bottom: 5px; display: flex; align-items: center; justify-content: center; background: white; border-radius: 4px; border: 1px solid #ddd;">
-          <img src="${getDevCardIconUrl(cardType.icon)}" 
-               style="width: 24px; height: 32px;" 
-               alt="${cardType.name}" 
-               title="${cardType.name}" />
+        display += generateSectionHeader('dev-cards-header', `Development Cards Remaining: ${game.devCards}`, collapsed);
+        if (!collapsed) {
+            display +=
+                '<div style="display: flex; justify-content: space-around; align-items: center; padding: 10px; background: #f8f9fa; border-radius: 6px; border: 1px solid #e9ecef;">';
+            devCardTypes.forEach(cardType => {
+                const remaining = game[cardType.key];
+                const total = cardType.key === 'knights'
+                    ? 14
+                    : cardType.key === 'victoryPoints'
+                        ? 5
+                        : 2;
+                display += `
+        <div style="display: flex; flex-direction: column; align-items: center; min-width: 60px;">
+          <div style="width: 32px; height: 40px; margin-bottom: 5px; display: flex; align-items: center; justify-content: center; background: white; border-radius: 4px; border: 1px solid #ddd;">
+            <img src="${getDevCardIconUrl(cardType.icon)}"
+                 style="width: 24px; height: 32px;"
+                 alt="${cardType.name}"
+                 title="${cardType.name}" />
+          </div>
+          <div style="font-size: 12px; font-weight: bold; color: #2c3e50;">
+            ${remaining}/${total}
+          </div>
+          <div style="font-size: 9px; color: #666; text-align: center; line-height: 1.1;">
+            ${cardType.name}
+          </div>
         </div>
-        <div style="font-size: 12px; font-weight: bold; color: #2c3e50;">
-          ${remaining}/${total}
-        </div>
-        <div style="font-size: 9px; color: #666; text-align: center; line-height: 1.1;">
-          ${cardType.name}
-        </div>
-      </div>
-    `;
-        });
-        display += '</div></div>';
+      `;
+            });
+            display += '</div>';
+        }
+        display += '</div>';
         return display;
     }
     function generateDiceChart() {
@@ -2353,11 +2469,7 @@
         // so the chart never disappears entirely, just the space it takes up.
         let chart = `
     <div style="margin: 15px 0;">
-      <h4
-        id="dice-chart-header"
-        style="margin: 0 0 ${collapsed ? 0 : 10}px 0; text-align: center; cursor: pointer; user-select: none;"
-        title="${collapsed ? 'Show dice roll frequency' : 'Hide dice roll frequency'}"
-      >Dice Roll Frequency <span style="font-size: 10px; color: #999;">${collapsed ? '▸' : '▾'}</span></h4>
+      ${generateSectionHeader('dice-chart-header', 'Dice Roll Frequency', collapsed)}
   `;
         if (!collapsed) {
             const maxRolls = Math.max(...Object.values(game.diceRolls), 1);
@@ -2398,33 +2510,38 @@
         if (!hasBlockedRolls) {
             return '';
         }
-        let display = '<div style="margin: 15px 0;"><h4 style="margin: 0 0 10px 0; text-align: center;">🔒 Blocked by Robber</h4>';
-        display +=
-            '<div style="background: #f8f9fa; padding: 10px; border-radius: 6px; font-size: 12px; line-height: 1.4;">';
-        // Collect all blocked entries
-        const blockedEntries = [];
-        Object.entries(game.blockedDiceRolls).forEach(([diceNumber, resources]) => {
-            Object.entries(resources).forEach(([resource, count]) => {
-                if (count > 0) {
-                    blockedEntries.push({
-                        number: parseInt(diceNumber),
-                        resource,
-                        count,
-                    });
-                }
+        const collapsed = uiPrefs.blockedDiceCollapsed;
+        let display = '<div style="margin: 15px 0;">';
+        display += generateSectionHeader('blocked-dice-header', '🔒 Blocked by Robber', collapsed);
+        if (!collapsed) {
+            display +=
+                '<div style="background: #f8f9fa; padding: 10px; border-radius: 6px; font-size: 12px; line-height: 1.4;">';
+            // Collect all blocked entries
+            const blockedEntries = [];
+            Object.entries(game.blockedDiceRolls).forEach(([diceNumber, resources]) => {
+                Object.entries(resources).forEach(([resource, count]) => {
+                    if (count > 0) {
+                        blockedEntries.push({
+                            number: parseInt(diceNumber),
+                            resource,
+                            count,
+                        });
+                    }
+                });
             });
-        });
-        // Sort by dice number, then by resource
-        blockedEntries.sort((a, b) => {
-            if (a.number !== b.number) {
-                return a.number - b.number;
-            }
-            return a.resource.localeCompare(b.resource);
-        });
-        // Generate the display text
-        const blockedTexts = blockedEntries.map(entry => `${entry.number} ${entry.resource}: ${entry.count}`);
-        display += blockedTexts.join('<br>');
-        display += '</div></div>';
+            // Sort by dice number, then by resource
+            blockedEntries.sort((a, b) => {
+                if (a.number !== b.number) {
+                    return a.number - b.number;
+                }
+                return a.resource.localeCompare(b.resource);
+            });
+            // Generate the display text
+            const blockedTexts = blockedEntries.map(entry => `${entry.number} ${entry.resource}: ${entry.count}`);
+            display += blockedTexts.join('<br>');
+            display += '</div>';
+        }
+        display += '</div>';
         return display;
     }
     /**
@@ -2466,9 +2583,13 @@
             return '';
         }
         const playerColor = (name) => { var _a, _b; return (_b = (_a = game.players.find(p => p.name === name)) === null || _a === void 0 ? void 0 : _a.color) !== null && _b !== void 0 ? _b : '#333'; };
+        const collapsed = uiPrefs.unknownTransactionsCollapsed;
         let display = '<div style="margin: 15px 0; padding: 8px; background: #fff3cd; border: 1px solid #ffeaa7; border-radius: 6px;">';
-        display +=
-            '<h4 style="margin: 0 0 8px 0; color: #856404; font-size: 12px; text-align: center;">🎭 Unresolved Steals</h4>';
+        display += generateSectionHeader('unknown-transactions-header', '🎭 Unresolved Steals', collapsed, { color: '#856404', fontSize: '12px', expandedMarginBottom: 8 });
+        if (collapsed) {
+            display += '</div>';
+            return display;
+        }
         unresolvedTransactions.forEach(transaction => {
             const transactionResourceProbabilities = game.probableGameState.getTransactionResourceProbabilities(transaction.id);
             const chips = transactionResourceProbabilities
@@ -2598,6 +2719,7 @@
         return `
     ${resourceSection}
     <div style="font-size: 12px; color: #666; text-align: center; line-height: 1.1;">${resourceCaption}</div>
+    ${generateCollapseAllControl()}
     ${generateUnknownTransactionsDisplay()}
     ${generateDevCardsDisplay()}
     <div style="font-size: 12px; color: #666; text-align: center; line-height: 1.1;">Cards in your hand are currently not counted</div>
@@ -2734,11 +2856,37 @@
                 toggleResourceViewMode();
             });
         }
-        // Add dice-chart collapse/expand functionality
+        // Add collapse/expand functionality for each collapsible section
         const diceChartHeader = overlay.querySelector('#dice-chart-header');
         if (diceChartHeader) {
             diceChartHeader.addEventListener('click', () => {
                 toggleDiceChartCollapsed();
+            });
+        }
+        const unknownTransactionsHeader = overlay.querySelector('#unknown-transactions-header');
+        if (unknownTransactionsHeader) {
+            unknownTransactionsHeader.addEventListener('click', () => {
+                toggleUnknownTransactionsCollapsed();
+            });
+        }
+        const devCardsHeader = overlay.querySelector('#dev-cards-header');
+        if (devCardsHeader) {
+            devCardsHeader.addEventListener('click', () => {
+                toggleDevCardsCollapsed();
+            });
+        }
+        const blockedDiceHeader = overlay.querySelector('#blocked-dice-header');
+        if (blockedDiceHeader) {
+            blockedDiceHeader.addEventListener('click', () => {
+                toggleBlockedDiceCollapsed();
+            });
+        }
+        // Add "collapse/expand all" bulk toggle functionality
+        const collapseAllBtn = overlay.querySelector('#collapse-all-btn');
+        if (collapseAllBtn) {
+            collapseAllBtn.addEventListener('click', e => {
+                e.stopPropagation();
+                toggleCollapseAll();
             });
         }
         // Add save-log button functionality

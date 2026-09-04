@@ -265,4 +265,152 @@ describe('overlay unresolved-steals display', () => {
 
     expect(document.body.textContent).toContain('Resolve Unknown Transaction');
   });
+
+  it('collapses and expands via its own header, like the dice chart', () => {
+    showGameStateOverlay();
+    let overlay = getOverlay();
+
+    const header = overlay.querySelector(
+      '#unknown-transactions-header'
+    ) as HTMLElement;
+    expect(header).toBeTruthy();
+    expect(header.textContent).toContain('▾');
+    expect(overlay.querySelector('.unknown-transaction-item')).toBeTruthy();
+
+    header.click();
+    overlay = getOverlay();
+    const collapsedHeader = overlay.querySelector(
+      '#unknown-transactions-header'
+    ) as HTMLElement;
+    expect(collapsedHeader.textContent).toContain('▸');
+    // Header survives collapse, but the individual steal rows don't.
+    expect(overlay.querySelector('.unknown-transaction-item')).toBeNull();
+
+    collapsedHeader.click();
+    overlay = getOverlay();
+    expect(overlay.querySelector('.unknown-transaction-item')).toBeTruthy();
+  });
+});
+
+describe('overlay development cards collapse', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '';
+    resetGameState();
+    _resetOverlayForTesting();
+    (globalThis as any).chrome = { runtime: { getURL: (p: string) => p } };
+
+    placeSettlement('Alice');
+    game.probableGameState = new PropbableGameState(game.players);
+    game.hasRolledFirstDice = true;
+  });
+
+  it('is expanded by default and collapses/expands via its header', () => {
+    showGameStateOverlay();
+    let overlay = getOverlay();
+
+    const header = overlay.querySelector('#dev-cards-header') as HTMLElement;
+    expect(header).toBeTruthy();
+    expect(header.textContent).toContain('▾');
+    expect(overlay.textContent).toContain('Knight');
+
+    header.click();
+    overlay = getOverlay();
+    const collapsedHeader = overlay.querySelector(
+      '#dev-cards-header'
+    ) as HTMLElement;
+    expect(collapsedHeader.textContent).toContain('▸');
+    expect(overlay.textContent).not.toContain('Knight');
+    // The count in the header itself stays visible even collapsed.
+    expect(collapsedHeader.textContent).toContain('Development Cards Remaining');
+  });
+});
+
+describe('overlay blocked-dice collapse', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '';
+    resetGameState();
+    _resetOverlayForTesting();
+    (globalThis as any).chrome = { runtime: { getURL: (p: string) => p } };
+
+    placeSettlement('Alice');
+    game.probableGameState = new PropbableGameState(game.players);
+    game.hasRolledFirstDice = true;
+    game.blockedDiceRolls = { 9: { ore: 2 } };
+  });
+
+  it('is expanded by default and collapses/expands via its header', () => {
+    showGameStateOverlay();
+    let overlay = getOverlay();
+
+    const header = overlay.querySelector(
+      '#blocked-dice-header'
+    ) as HTMLElement;
+    expect(header).toBeTruthy();
+    expect(overlay.textContent).toContain('9 ore: 2');
+
+    header.click();
+    overlay = getOverlay();
+    expect(overlay.textContent).not.toContain('9 ore: 2');
+    expect(
+      (overlay.querySelector('#blocked-dice-header') as HTMLElement)
+        .textContent
+    ).toContain('▸');
+  });
+});
+
+describe('overlay collapse-all control', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '';
+    resetGameState();
+    _resetOverlayForTesting();
+    (globalThis as any).chrome = { runtime: { getURL: (p: string) => p } };
+
+    placeSettlement('Aaren');
+    placeSettlement('Bora');
+    game.probableGameState = new PropbableGameState(game.players);
+    playerGetResources('Bora', { tree: 1, wheat: 1 });
+    unknownSteal('Aaren', 'Bora');
+    game.hasRolledFirstDice = true;
+    game.diceRolls[8] = 3;
+    game.blockedDiceRolls = { 9: { ore: 1 } };
+  });
+
+  it('sits above Unresolved Steals and collapses every section at once', () => {
+    showGameStateOverlay();
+    let overlay = getOverlay();
+
+    const btn = overlay.querySelector('#collapse-all-btn') as HTMLElement;
+    expect(btn).toBeTruthy();
+    expect(btn.textContent).toContain('Collapse all');
+
+    // It renders before the Unresolved Steals section in the markup.
+    const html = overlay.innerHTML;
+    expect(html.indexOf('collapse-all-btn')).toBeLessThan(
+      html.indexOf('unknown-transactions-header')
+    );
+
+    btn.click();
+    overlay = getOverlay();
+
+    expect(overlay.querySelector('.unknown-transaction-item')).toBeNull();
+    expect(overlay.textContent).not.toContain('Knight');
+    expect(overlay.textContent).not.toContain('9 ore: 1');
+    ['#unknown-transactions-header', '#dev-cards-header', '#dice-chart-header', '#blocked-dice-header']
+      .forEach(sel => {
+        expect(
+          (overlay.querySelector(sel) as HTMLElement).textContent
+        ).toContain('▸');
+      });
+
+    const collapsedBtn = overlay.querySelector(
+      '#collapse-all-btn'
+    ) as HTMLElement;
+    expect(collapsedBtn.textContent).toContain('Expand all');
+
+    collapsedBtn.click();
+    overlay = getOverlay();
+    expect(overlay.querySelector('.unknown-transaction-item')).toBeTruthy();
+    expect(overlay.textContent).toContain('Knight');
+    expect(overlay.textContent).toContain('9 ore: 1');
+  });
 });
