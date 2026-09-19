@@ -249,19 +249,6 @@ export class VariantTransactionProcessor {
     }
   }
 
-  getMostLikelyGameState(): {
-    gameState: GameState;
-    probability: number;
-  } | null {
-    const variants = this.variantTree.getCurrentVariants();
-    if (variants.length === 0) return null;
-
-    return {
-      gameState: variants[0].gameState,
-      probability: variants[0].probability,
-    };
-  }
-
   getAllPossibleGameStates(): Array<{
     gameState: GameState;
     probability: number;
@@ -270,52 +257,6 @@ export class VariantTransactionProcessor {
       gameState: variant.gameState,
       probability: variant.probability,
     }));
-  }
-
-  /**
-   * Get uncertainty level for a specific player's resources
-   */
-  getPlayerResourceUncertainty(playerName: string): {
-    [K in keyof ResourceObjectType]: {
-      min: number;
-      max: number;
-      mostLikely: number;
-      confidence: number;
-    };
-  } {
-    const variants = this.variantTree.getCurrentVariants();
-    const result = {} as any;
-
-    for (const resourceType of RESOURCE_TYPES) {
-      const values = variants
-        .map(v => ({
-          value: v.gameState[playerName]?.resources[resourceType] || 0,
-          probability: v.probability,
-        }))
-        .filter(v => v.value !== undefined);
-
-      if (values.length === 0) {
-        result[resourceType] = { min: 0, max: 0, mostLikely: 0, confidence: 0 };
-        continue;
-      }
-
-      const min = Math.min(...values.map(v => v.value));
-      const max = Math.max(...values.map(v => v.value));
-
-      // Most likely value (highest probability)
-      const mostLikely = values.reduce((best, current) =>
-        current.probability > best.probability ? current : best
-      ).value;
-
-      // Confidence = probability of the most likely value
-      const confidence = values
-        .filter(v => v.value === mostLikely)
-        .reduce((sum, v) => sum + v.probability, 0);
-
-      result[resourceType] = { min, max, mostLikely, confidence };
-    }
-
-    return result;
   }
 
   /**

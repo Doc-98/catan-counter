@@ -789,52 +789,11 @@
                 }
             }
         }
-        getMostLikelyGameState() {
-            const variants = this.variantTree.getCurrentVariants();
-            if (variants.length === 0)
-                return null;
-            return {
-                gameState: variants[0].gameState,
-                probability: variants[0].probability,
-            };
-        }
         getAllPossibleGameStates() {
             return this.variantTree.getCurrentVariants().map(variant => ({
                 gameState: variant.gameState,
                 probability: variant.probability,
             }));
-        }
-        /**
-         * Get uncertainty level for a specific player's resources
-         */
-        getPlayerResourceUncertainty(playerName) {
-            const variants = this.variantTree.getCurrentVariants();
-            const result = {};
-            for (const resourceType of RESOURCE_TYPES) {
-                const values = variants
-                    .map(v => {
-                    var _a;
-                    return ({
-                        value: ((_a = v.gameState[playerName]) === null || _a === void 0 ? void 0 : _a.resources[resourceType]) || 0,
-                        probability: v.probability,
-                    });
-                })
-                    .filter(v => v.value !== undefined);
-                if (values.length === 0) {
-                    result[resourceType] = { min: 0, max: 0, mostLikely: 0, confidence: 0 };
-                    continue;
-                }
-                const min = Math.min(...values.map(v => v.value));
-                const max = Math.max(...values.map(v => v.value));
-                // Most likely value (highest probability)
-                const mostLikely = values.reduce((best, current) => current.probability > best.probability ? current : best).value;
-                // Confidence = probability of the most likely value
-                const confidence = values
-                    .filter(v => v.value === mostLikely)
-                    .reduce((sum, v) => sum + v.probability, 0);
-                result[resourceType] = { min, max, mostLikely, confidence };
-            }
-            return result;
         }
         /**
          * Helper: Deep clone game state
@@ -1426,12 +1385,6 @@
             this.variantTree.pruneInvalidNodes();
         }
         /**
-         * Get the current best estimate of a player's resources
-         */
-        getPlayerResources(playerName) {
-            return this.transactionProcessor.getPlayerResourceUncertainty(playerName);
-        }
-        /**
          * Get resource probabilities for a player.
          *
          * Returns the minimum guaranteed count per resource, plus two views of the
@@ -1545,12 +1498,6 @@
             };
         }
         /**
-         * Get the most likely complete game state
-         */
-        getMostLikelyGameState() {
-            return this.transactionProcessor.getMostLikelyGameState();
-        }
-        /**
          * Get all possible game states with their probabilities
          */
         getAllPossibleGameStates() {
@@ -1563,41 +1510,6 @@
             return this.variantTree.getCurrentVariantNodes().length;
         }
         /**
-         * Get uncertainty score for the entire game state (0 = certain, 1 = completely uncertain)
-         */
-        getUncertaintyScore() {
-            const variants = this.variantTree.getCurrentVariants();
-            if (variants.length <= 1)
-                return 0;
-            // Calculate entropy as a measure of uncertainty
-            const entropy = variants.reduce((sum, variant) => {
-                if (variant.probability > 0) {
-                    return sum - variant.probability * Math.log2(variant.probability);
-                }
-                return sum;
-            }, 0);
-            // Normalize entropy to 0-1 scale
-            const maxEntropy = Math.log2(variants.length);
-            return maxEntropy > 0 ? entropy / maxEntropy : 0;
-        }
-        /**
-         * Debug: Print current variants and their probabilities
-         */
-        debugPrintVariants() {
-            const variants = this.variantTree.getCurrentVariants();
-            console.log(`\n=== Current Game State Variants (${variants.length} total) ===`);
-            variants.forEach((variant, index) => {
-                console.log(`\nVariant ${index + 1} (${(variant.probability * 100).toFixed(1)}% probability):`);
-                for (const [playerName, playerState] of Object.entries(variant.gameState)) {
-                    const resources = Object.entries(playerState.resources)
-                        .map(([type, count]) => `${type}: ${count}`)
-                        .join(', ');
-                    console.log(`  ${playerName}: ${resources}`);
-                }
-            });
-            console.log(`\nUncertainty Score: ${(this.getUncertaintyScore() * 100).toFixed(1)}%`);
-        }
-        /**
          * Get resource probabilities for a specific transaction
          */
         getTransactionResourceProbabilities(transactionId) {
@@ -1608,51 +1520,6 @@
          */
         getTransactionHistory() {
             return [...this.transactionHistory]; // Return a copy to prevent external modification
-        }
-        /**
-         * Get the number of transactions processed
-         */
-        getTransactionCount() {
-            return this.transactionHistory.length;
-        }
-        /**
-         * Debug: Print transaction history in a readable format
-         */
-        debugPrintTransactionHistory() {
-            console.log(`\n=== Transaction History (${this.transactionHistory.length} total) ===`);
-            this.transactionHistory.forEach((transaction, index) => {
-                console.log(`\n${index + 1}. ${transaction.type}:`);
-                switch (transaction.type) {
-                    case TransactionTypeEnum.ROBBER_STEAL:
-                        console.log(`  ${transaction.stealerName} stole from ${transaction.victimName}${transaction.stolenResource ? ` (${transaction.stolenResource})` : ' (unknown resource)'}`);
-                        break;
-                    case TransactionTypeEnum.MONOPOLY:
-                        console.log(`  ${transaction.playerName} played monopoly on ${transaction.resourceType}, stole ${transaction.totalStolen} total`);
-                        break;
-                    case TransactionTypeEnum.TRADE:
-                        console.log(`  Trade between ${transaction.player1} and ${transaction.player2}`);
-                        console.log(`  Resource changes: ${JSON.stringify(transaction.resourceChanges)}`);
-                        break;
-                    case TransactionTypeEnum.TRADE_OFFER:
-                        console.log(`  ${transaction.playerName} offered: ${JSON.stringify(transaction.offeredResources)}`);
-                        break;
-                    case TransactionTypeEnum.RESOURCE_GAIN:
-                        console.log(`  ${transaction.playerName} gained: ${JSON.stringify(transaction.resources)}`);
-                        break;
-                    case TransactionTypeEnum.RESOURCE_LOSS:
-                        console.log(`  ${transaction.playerName} lost: ${JSON.stringify(transaction.resources)}`);
-                        break;
-                    case TransactionTypeEnum.BANK_TRADE:
-                        console.log(`  ${transaction.playerName} bank trade: ${JSON.stringify(transaction.resourceChanges)}`);
-                        break;
-                }
-            });
-        }
-        /**
-         * Clear transaction history (useful for testing or restarting)
-         */
-        clearTransactionHistory() {
-            this.transactionHistory = [];
         }
     }
 
