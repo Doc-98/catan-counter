@@ -202,6 +202,92 @@ let youPlayerSelectedCallback: (() => void) | null = null;
 // True while content.ts is scrolling the chat to rebuild history after a page
 // load/refresh. The overlay shows a loader instead of (stale/partial) counts.
 let isLoadingHistory = false;
+// content.ts owns actually resetting and replaying the tracker (it has the
+// chat container and the history-loading sweep); the overlay just reports
+// that the reset button was clicked.
+let resetRequestedCallback: (() => void) | null = null;
+
+// =============================================================================
+// POP OUT TO A SEPARATE WINDOW
+// =============================================================================
+
+// The window the overlay currently lives in when popped out, or null while
+// it's sitting in the page. Not the same document as `document` throughout
+// this file, which is always the colonist.io page's own document.
+let popoutWindow: Window | null = null;
+let popoutWatcherId: number | null = null;
+
+function isOverlayPoppedOut(): boolean {
+  return !!popoutWindow && !popoutWindow.closed;
+}
+
+/** Move the overlay back into the page and stop watching the popout window. */
+function bringOverlayHome(): void {
+  if (popoutWatcherId !== null) {
+    window.clearInterval(popoutWatcherId);
+    popoutWatcherId = null;
+  }
+  popoutWindow = null;
+  if (gameStateOverlay && gameStateOverlay.ownerDocument !== document) {
+    document.body.appendChild(gameStateOverlay);
+    updateOverlayContent(gameStateOverlay);
+  }
+}
+
+/**
+ * Toggle the overlay between sitting on the page and living in its own
+ * browser window (e.g. dragged to a second monitor). The same DOM node is
+ * reused either way — moved with adoptNode/appendChild rather than rebuilt —
+ * so its content keeps updating live in both places without any special
+ * casing elsewhere in this file.
+ *
+ * Dragging and resizing are wired to `document`'s mousemove/mouseup (see
+ * createGameStateOverlay), which only ever means the page's document; the
+ * popout needs the same listeners bound to ITS document for those
+ * interactions to keep working once the overlay moves there.
+ */
+function togglePopout(): void {
+  if (isOverlayPoppedOut()) {
+    popoutWindow!.close();
+    bringOverlayHome();
+    return;
+  }
+  if (!gameStateOverlay) return;
+
+  const win = window.open(
+    '',
+    'catan-counter-popout',
+    'width=480,height=900,resizable=yes'
+  );
+  if (!win) {
+    console.warn(
+      '🃏 Could not open a popout window — it may have been blocked by the browser.'
+    );
+    return;
+  }
+
+  win.document.title = 'Catan Counter';
+  win.document.body.style.margin = '0';
+  win.document.body.style.background = '#e9ecef';
+  win.document.addEventListener('mousemove', handleMouseMove);
+  win.document.addEventListener('mouseup', stopDragAndResize);
+
+  win.document.adoptNode(gameStateOverlay);
+  win.document.body.appendChild(gameStateOverlay);
+  popoutWindow = win;
+
+  // window.close() from the button above fires this immediately via
+  // bringOverlayHome(), but the user can also close the popout with the
+  // browser's own window controls — poll for that so the overlay doesn't
+  // stay stranded in a window that no longer exists.
+  popoutWatcherId = window.setInterval(() => {
+    if (popoutWindow && popoutWindow.closed) {
+      bringOverlayHome();
+    }
+  }, 500);
+
+  updateOverlayContent(gameStateOverlay);
+}
 
 // =============================================================================
 // OVERLAY UI PREFERENCES (resource view mode, collapsible sections, ...)
@@ -358,6 +444,12 @@ export function _resetOverlayForTesting(): void {
     diceChartCollapsed: false,
     blockedDiceCollapsed: false,
   };
+  resetRequestedCallback = null;
+  if (popoutWatcherId !== null) {
+    window.clearInterval(popoutWatcherId);
+    popoutWatcherId = null;
+  }
+  popoutWindow = null;
 }
 
 function createGameStateOverlay(): HTMLDivElement {
@@ -412,15 +504,11 @@ function startDrag(e: MouseEvent): void {
     return;
   }
 
-  // Only allow dragging from the header
+  // Only allow dragging from the header, and never from one of its buttons
+  // (checking closest('button') here, rather than an id per button, means a
+  // newly added header button never has to be special-cased in this list).
   const header = gameStateOverlay.querySelector('#overlay-header');
-  if (
-    !header?.contains(target) ||
-    target.id === 'minimize-btn' ||
-    target.id === 'save-log-btn' ||
-    target.id === 'view-toggle-btn'
-  )
-    return;
+  if (!header?.contains(target) || target.closest('button')) return;
 
   isDragging = true;
   const rect = gameStateOverlay.getBoundingClientRect();
@@ -552,14 +640,21 @@ function generateResourceProbabilityTable(): string {
       const resourceKey =
         resource as keyof typeof probabilities.minimumResources;
       const minCount = probabilities.minimumResources[resourceKey];
-      const additionalProb =
-        probabilities.additionalResourceProbabilities[resourceKey];
+      const steps = probabilities.additionalResourceProbabilitySteps[
+        resourceKey
+      ];
 
-      // Format: "minimum + probability%"
+      // Format: "minimum +step1% +step2% ..." — usually just one extra
+      // badge, but several unresolved steals landing on the same player can
+      // spread their hand across more than one card of the same resource,
+      // so each rung of the probability ladder gets its own badge instead
+      // of being folded into a single misleadingly-confident number.
       let displayText = minCount.toString();
-      if (additionalProb > 0) {
-        displayText += ` <span style="color:rgb(47, 120, 23); font-size: 10px;">+${additionalProb.toFixed(2)}</span>`;
-      }
+      steps.forEach(stepProbability => {
+        if (stepProbability > 0) {
+          displayText += ` <span style="color:rgb(47, 120, 23); font-size: 10px;">+${stepProbability.toFixed(2)}</span>`;
+        }
+      });
 
       table += `<td style="padding: 8px; border: 1px solid #ddd; text-align: center; width: 65px;background: ${resourceColors[index]}; font-weight: bold;">
         ${displayText}
@@ -583,26 +678,35 @@ const HAND_CARD_OVERLAP_PX = 32;
 
 /**
  * Render one resource card. A guaranteed card is opaque with a solid border;
- * an "additional" card (the single blended probability of holding more than
- * the guaranteed minimum, see getPlayerResourceProbabilities) is drawn with a
- * dashed border, a probability badge, and a white wash over the art — so
- * uncertainty reads as "faded ink", not see-through. The card itself stays
- * fully opaque (`opacity` is never touched) so it still fully occludes
- * whatever it's stacked on top of; a genuinely transparent card would let a
- * card behind it bleed through at the overlap.
+ * an "additional" card — one rung of the additionalResourceProbabilitySteps
+ * ladder from getPlayerResourceProbabilities, i.e. the probability of
+ * holding at least `atLeast` more than the guaranteed minimum — is drawn
+ * with a dashed border, a probability badge, and a white wash over the art
+ * so uncertainty reads as "faded ink", not see-through. The card itself
+ * stays fully opaque (`opacity` is never touched) so it still fully
+ * occludes whatever it's stacked on top of; a genuinely transparent card
+ * would let a card behind it bleed through at the overlap.
+ *
+ * A resource can carry more than one of these — e.g. "88% chance of at
+ * least 1 more" AND "25% chance of at least 2 more" — once several
+ * unresolved steals have landed on the same player and spread their hand
+ * further than a single extra card. Each rung renders as its own stacked
+ * card via a separate createHandCardHtml call, `atLeast` only changes the
+ * card's tooltip.
  *
  * `stackOnPrevious` pulls this card left to overlap the one before it in the
  * same resource group. Later cards paint over earlier ones in normal flow,
  * so the last (front) card of a group is always the fully visible one —
- * which is why the uncertain card, pushed last, ends up on top.
+ * which is why the least-certain rung, pushed last, ends up on top.
  */
 function createHandCardHtml(
   resource: keyof typeof RESOURCE_ICONS,
-  options?: { probability?: number; stackOnPrevious?: boolean }
+  options?: { probability?: number; stackOnPrevious?: boolean; atLeast?: number }
 ): string {
   const iconUrl = getResourceIconUrl(resource);
   const probability = options?.probability;
   const isUncertain = probability !== undefined;
+  const atLeast = options?.atLeast ?? 1;
   // Whiten more heavily at low probability, tapering off as probability
   // rises (mirrors the old opacity curve, just as an opaque wash instead of
   // true transparency: floor ~10% wash near-certain, ~65% wash near-zero).
@@ -629,7 +733,7 @@ function createHandCardHtml(
       ">${Math.round(probability! * 100)}%</span>`
     : '';
   const title = isUncertain
-    ? `Maybe ${formatResourceName(resource)} (${Math.round(probability! * 100)}% chance of one more)`
+    ? `Maybe ${formatResourceName(resource)} (${Math.round(probability! * 100)}% chance of at least ${atLeast} more)`
     : formatResourceName(resource);
   const overlapStyle = options?.stackOnPrevious
     ? `margin-left: -${HAND_CARD_OVERLAP_PX}px;`
@@ -660,8 +764,8 @@ function createHandCardHtml(
  * Alternative to generateResourceProbabilityTable(): renders each player's
  * resources as a row of cards (colonist's own hand tray, reusing the same
  * card art) instead of a numeric table. Uses the exact same underlying data
- * (minimumResources / additionalResourceProbabilities) so the two views never
- * disagree — only the presentation differs.
+ * (minimumResources / additionalResourceProbabilitySteps) so the two views
+ * never disagree — only the presentation differs.
  */
 function generateResourceHandView(): string {
   if (!game.probableGameState || game.players.length === 0) {
@@ -683,9 +787,7 @@ function generateResourceHandView(): string {
 
     resourceNames.forEach(resource => {
       const minCount = probabilities.minimumResources[resource];
-      const additionalProb = probabilities.additionalResourceProbabilities[
-        resource
-      ];
+      const steps = probabilities.additionalResourceProbabilitySteps[resource];
       knownTotal += minCount;
 
       for (let i = 0; i < minCount; i++) {
@@ -693,17 +795,24 @@ function generateResourceHandView(): string {
           createHandCardHtml(resource, { stackOnPrevious: i > 0 })
         );
       }
-      if (additionalProb > 0) {
+      // One card per rung of the ladder — usually just one ("probably 1
+      // more"), but several unresolved steals landing on the same player
+      // can genuinely spread their hand across more than one extra card of
+      // the same resource, and each rung gets its own fading, lower-odds
+      // card instead of being folded into the first one.
+      steps.forEach((stepProbability, index) => {
+        if (stepProbability <= 0) return;
         cards.push(
           createHandCardHtml(resource, {
-            probability: additionalProb,
-            // Only the very first card of a group (this one, if it's the
-            // only card) sits flush; otherwise it fans out on top of the
-            // guaranteed cards ahead of it, becoming the visible "front" card.
-            stackOnPrevious: minCount > 0,
+            probability: stepProbability,
+            atLeast: index + 1,
+            // Only the very first card of a group (no guaranteed cards and
+            // this is also the first rung) sits flush; every other card
+            // fans out on top of whatever came before it in the group.
+            stackOnPrevious: minCount > 0 || index > 0,
           })
         );
-      }
+      });
     });
 
     html += `
@@ -1185,8 +1294,8 @@ function generateMainContent(): string {
       : generateResourceProbabilityTable();
   const resourceCaption =
     uiPrefs.resourceViewMode === 'hand'
-      ? 'Solid cards are guaranteed; whitened dashed cards show the chance of one more.'
-      : 'Numbers shown are guaranteed resources, additional resources are shown as a probability';
+      ? 'Solid cards are guaranteed; each whitened dashed card shows the chance of having at least that many more.'
+      : 'Numbers shown are guaranteed resources; each extra number is the probability of having at least that many more';
 
   const moreStats = uiPrefs.moreStatsCollapsed
     ? ''
@@ -1296,6 +1405,24 @@ function updateOverlayContent(overlay: HTMLDivElement): void {
           padding: 2px 6px;
           border-radius: 3px;
         " title="Download this game's chat log as JSON">💾</button>
+        <button id="reset-btn" style="
+          background: none;
+          border: none;
+          color: white;
+          cursor: pointer;
+          font-size: 14px;
+          padding: 2px 6px;
+          border-radius: 3px;
+        " title="Reset tracker (reload from chat history)">🔄</button>
+        <button id="popout-btn" style="
+          background: none;
+          border: ${isOverlayPoppedOut() ? '1px solid rgba(255,255,255,0.6)' : 'none'};
+          color: white;
+          cursor: pointer;
+          font-size: 14px;
+          padding: 2px 6px;
+          border-radius: 3px;
+        " title="${isOverlayPoppedOut() ? 'Return to page' : 'Open in a separate window'}">🗗</button>
         <button id="minimize-btn" style="
           background: none;
           border: none;
@@ -1398,6 +1525,24 @@ function updateOverlayContent(overlay: HTMLDivElement): void {
     });
   }
 
+  // Add reset button functionality
+  const resetBtn = overlay.querySelector('#reset-btn') as HTMLButtonElement;
+  if (resetBtn) {
+    resetBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      resetRequestedCallback?.();
+    });
+  }
+
+  // Add popout button functionality
+  const popoutBtn = overlay.querySelector('#popout-btn') as HTMLButtonElement;
+  if (popoutBtn) {
+    popoutBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      togglePopout();
+    });
+  }
+
   // Add event listeners for transaction items
   const transactionItems = overlay.querySelectorAll(
     '.unknown-transaction-item'
@@ -1445,6 +1590,11 @@ export function updateGameStateDisplay(): void {
 
 export function setYouPlayerSelectedCallback(callback: () => void): void {
   youPlayerSelectedCallback = callback;
+}
+
+/** Registers what happens when the reset button is clicked — see resetRequestedCallback. */
+export function setResetRequestedCallback(callback: () => void): void {
+  resetRequestedCallback = callback;
 }
 
 /**

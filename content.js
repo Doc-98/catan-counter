@@ -501,6 +501,38 @@
             return mergedVariants.sort((a, b) => b.probability - a.probability);
         }
         /**
+         * Keep only the `maxLeaves` highest-cumulative-probability leaves,
+         * removing the rest — a hard, unconditional ceiling on tree size (see
+         * trackerConfig.maxVariants for why this exists: unresolved steals branch
+         * multiplicatively, and probability-based culling has nothing to prune
+         * when a victim's holdings stay roughly balanced across several of them
+         * in a row, so variant count — and the cost of every later computation
+         * over it — can otherwise grow unchecked).
+         *
+         * No-op if already at or under the cap. Removes leaves one at a time via
+         * the existing removeVariantNode (so sibling probabilities keep
+         * rebalancing correctly and a tree that happens to collapse to one path
+         * mid-removal is handled the same way any other pruning path handles it).
+         */
+        capVariantCount(maxLeaves) {
+            const leaves = this.getCurrentVariantNodes();
+            if (leaves.length <= maxLeaves)
+                return;
+            const ranked = leaves.map(node => {
+                let probability = node.probability;
+                let parent = node.parent;
+                while (parent) {
+                    probability *= parent.probability;
+                    parent = parent.parent;
+                }
+                return { node, probability };
+            });
+            ranked.sort((a, b) => b.probability - a.probability);
+            for (const { node } of ranked.slice(maxLeaves)) {
+                this.removeVariantNode(node);
+            }
+        }
+        /**
          * Collapse the tree to a single node when every leaf agrees on the current
          * game state.
          *
@@ -757,52 +789,11 @@
                 }
             }
         }
-        getMostLikelyGameState() {
-            const variants = this.variantTree.getCurrentVariants();
-            if (variants.length === 0)
-                return null;
-            return {
-                gameState: variants[0].gameState,
-                probability: variants[0].probability,
-            };
-        }
         getAllPossibleGameStates() {
             return this.variantTree.getCurrentVariants().map(variant => ({
                 gameState: variant.gameState,
                 probability: variant.probability,
             }));
-        }
-        /**
-         * Get uncertainty level for a specific player's resources
-         */
-        getPlayerResourceUncertainty(playerName) {
-            const variants = this.variantTree.getCurrentVariants();
-            const result = {};
-            for (const resourceType of RESOURCE_TYPES) {
-                const values = variants
-                    .map(v => {
-                    var _a;
-                    return ({
-                        value: ((_a = v.gameState[playerName]) === null || _a === void 0 ? void 0 : _a.resources[resourceType]) || 0,
-                        probability: v.probability,
-                    });
-                })
-                    .filter(v => v.value !== undefined);
-                if (values.length === 0) {
-                    result[resourceType] = { min: 0, max: 0, mostLikely: 0, confidence: 0 };
-                    continue;
-                }
-                const min = Math.min(...values.map(v => v.value));
-                const max = Math.max(...values.map(v => v.value));
-                // Most likely value (highest probability)
-                const mostLikely = values.reduce((best, current) => current.probability > best.probability ? current : best).value;
-                // Confidence = probability of the most likely value
-                const confidence = values
-                    .filter(v => v.value === mostLikely)
-                    .reduce((sum, v) => sum + v.probability, 0);
-                result[resourceType] = { min, max, mostLikely, confidence };
-            }
-            return result;
         }
         /**
          * Helper: Deep clone game state
@@ -1009,6 +1000,44 @@
         }
     }
 
+    // trackerConfig.ts
+    // Tuning switches for the variant tracker.
+    const trackerConfig = {
+        /**
+         * Approximate refinements: cull outcome branches below 3% probability and
+         * auto-resolve steals once one outcome reaches >= 95%. These trade a small
+         * chance of being wrong for a tighter tree and a shorter unknown-transaction
+         * list; a wrong guess self-heals via the force-apply contradiction handling.
+         *
+         * Off by default: with this off the tracker is exact — it only ever states
+         * what provably follows from the chat. Exact inference (certainty
+         * resolution, convergence collapse, hand-count pruning) is always active
+         * regardless of this flag.
+         */
+        approximateRefinements: false,
+        /**
+         * Hard ceiling on how many simultaneous game-state variants the tracker
+         * keeps, checked after every transaction regardless of
+         * approximateRefinements above.
+         *
+         * Each unresolved steal branches multiplicatively (one branch per resource
+         * type the victim could hold), so a handful in a row without anything to
+         * resolve them can explode the tree combinatorially — and when a victim's
+         * holdings stay roughly balanced across those steals, every branch stays
+         * above approximateRefinements' 3% cull threshold, so that flag alone
+         * doesn't help. Measured directly: 625 variants took ~1.4s to recompute
+         * probabilities for, 3125 took ~20s — on the UI thread, on every chat
+         * message from that point on, which is exactly what a user report of the
+         * extension "freezing" mid-game describes. This cap keeps only the highest-
+         * probability variants once the tree passes it, trading a small chance of
+         * dropping the branch that turns out to be true for staying responsive —
+         * consistent with how cullImprobableOutcomes/autoResolveDominantOutcomes
+         * already trade exactness for speed, just as an unconditional backstop
+         * instead of a probability-gated one.
+         */
+        maxVariants: 150,
+    };
+
     function updateResourceAmount(resources, resourceType, amount) {
         resources[resourceType] += amount;
     }
@@ -1105,11 +1134,17 @@
             }
         }
         /**
-         * Full refinement cycle for unknown transactions: resolve what's certain,
-         * cull vanishingly-unlikely outcome branches, auto-resolve dominant ones,
-         * then resolve again (culling can leave a transaction with one option).
+         * Full refinement cycle for unknown transactions: cap runaway tree growth,
+         * resolve what's certain, cull vanishingly-unlikely outcome branches,
+         * auto-resolve dominant ones, then resolve again (culling can leave a
+         * transaction with one option).
          */
         refineUnknownTransactions() {
+            // Unconditional, regardless of approximateRefinements below — see
+            // trackerConfig.maxVariants. Runs first so everything after it (here and
+            // in every render that follows) operates on an already-bounded tree
+            // instead of paying to compute over one that's already exploded.
+            this.variantTree.capVariantCount(trackerConfig.maxVariants);
             this.resolveAllUnknownTransactions();
             // When every variant agrees on the current hands, remaining branches are
             // purely historical (e.g. a card that made a round trip) — collapse them
@@ -1350,16 +1385,26 @@
             this.variantTree.pruneInvalidNodes();
         }
         /**
-         * Get the current best estimate of a player's resources
-         */
-        getPlayerResources(playerName) {
-            return this.transactionProcessor.getPlayerResourceUncertainty(playerName);
-        }
-        /**
-         * Get resource probabilities for a player
-         * Returns minimum guaranteed resources and probability of additional resources
+         * Get resource probabilities for a player.
+         *
+         * Returns the minimum guaranteed count per resource, plus two views of the
+         * uncertainty above that minimum:
+         *  - `additionalResourceProbabilities`: a single blended P(more than the
+         *    minimum) per resource — kept for callers that only need a yes/no
+         *    signal (e.g. gameActions' "which resources could this victim hold"
+         *    check).
+         *  - `additionalResourceProbabilitySteps`: the full ladder behind that
+         *    number — step[0] is P(at least minimum+1), step[1] is P(at least
+         *    minimum+2), and so on. A single stacked steal only ever needs step
+         *    0, but several unresolved steals landing on the same player can
+         *    genuinely spread their hand across more than one extra card per
+         *    resource; collapsing that into one blended probability silently hides
+         *    how much of it is "probably +1" versus "possibly +2 or more" — this
+         *    ladder is what lets the UI show that as multiple graduated cards
+         *    instead of one misleadingly-confident badge.
          */
         getPlayerResourceProbabilities(playerName) {
+            var _a;
             const variants = this.variantTree.getCurrentVariants();
             if (variants.length === 0) {
                 // No variants - return all zeros
@@ -1373,6 +1418,13 @@
                 return {
                     minimumResources: Object.assign({}, emptyResources),
                     additionalResourceProbabilities: Object.assign({}, emptyResources),
+                    additionalResourceProbabilitySteps: {
+                        tree: [],
+                        brick: [],
+                        sheep: [],
+                        wheat: [],
+                        ore: [],
+                    },
                 };
             }
             // Calculate minimum resources across all variants
@@ -1412,26 +1464,38 @@
                 wheat: 0,
                 ore: 0,
             };
+            const additionalResourceProbabilitySteps = {
+                tree: [],
+                brick: [],
+                sheep: [],
+                wheat: [],
+                ore: [],
+            };
             for (const resourceType of RESOURCE_TYPES) {
                 const minCount = minimumResources[resourceType];
-                let probabilityOfMore = 0;
-                for (const { resources, probability } of resourceCounts) {
-                    if (resources[resourceType] > minCount) {
-                        probabilityOfMore += probability;
+                const maxCount = resourceCounts.reduce((max, { resources }) => Math.max(max, resources[resourceType]), minCount);
+                // steps[i] = P(count >= minCount + i + 1), i.e. the probability of
+                // having reached at least the (i+1)th card beyond the guaranteed
+                // minimum. steps[0] is exactly the old single-number
+                // additionalResourceProbabilities value.
+                const steps = [];
+                for (let atLeast = minCount + 1; atLeast <= maxCount; atLeast++) {
+                    let probabilityAtLeast = 0;
+                    for (const { resources, probability } of resourceCounts) {
+                        if (resources[resourceType] >= atLeast) {
+                            probabilityAtLeast += probability;
+                        }
                     }
+                    steps.push(probabilityAtLeast);
                 }
-                additionalResourceProbabilities[resourceType] = probabilityOfMore;
+                additionalResourceProbabilitySteps[resourceType] = steps;
+                additionalResourceProbabilities[resourceType] = (_a = steps[0]) !== null && _a !== void 0 ? _a : 0;
             }
             return {
                 minimumResources,
                 additionalResourceProbabilities,
+                additionalResourceProbabilitySteps,
             };
-        }
-        /**
-         * Get the most likely complete game state
-         */
-        getMostLikelyGameState() {
-            return this.transactionProcessor.getMostLikelyGameState();
         }
         /**
          * Get all possible game states with their probabilities
@@ -1446,41 +1510,6 @@
             return this.variantTree.getCurrentVariantNodes().length;
         }
         /**
-         * Get uncertainty score for the entire game state (0 = certain, 1 = completely uncertain)
-         */
-        getUncertaintyScore() {
-            const variants = this.variantTree.getCurrentVariants();
-            if (variants.length <= 1)
-                return 0;
-            // Calculate entropy as a measure of uncertainty
-            const entropy = variants.reduce((sum, variant) => {
-                if (variant.probability > 0) {
-                    return sum - variant.probability * Math.log2(variant.probability);
-                }
-                return sum;
-            }, 0);
-            // Normalize entropy to 0-1 scale
-            const maxEntropy = Math.log2(variants.length);
-            return maxEntropy > 0 ? entropy / maxEntropy : 0;
-        }
-        /**
-         * Debug: Print current variants and their probabilities
-         */
-        debugPrintVariants() {
-            const variants = this.variantTree.getCurrentVariants();
-            console.log(`\n=== Current Game State Variants (${variants.length} total) ===`);
-            variants.forEach((variant, index) => {
-                console.log(`\nVariant ${index + 1} (${(variant.probability * 100).toFixed(1)}% probability):`);
-                for (const [playerName, playerState] of Object.entries(variant.gameState)) {
-                    const resources = Object.entries(playerState.resources)
-                        .map(([type, count]) => `${type}: ${count}`)
-                        .join(', ');
-                    console.log(`  ${playerName}: ${resources}`);
-                }
-            });
-            console.log(`\nUncertainty Score: ${(this.getUncertaintyScore() * 100).toFixed(1)}%`);
-        }
-        /**
          * Get resource probabilities for a specific transaction
          */
         getTransactionResourceProbabilities(transactionId) {
@@ -1491,51 +1520,6 @@
          */
         getTransactionHistory() {
             return [...this.transactionHistory]; // Return a copy to prevent external modification
-        }
-        /**
-         * Get the number of transactions processed
-         */
-        getTransactionCount() {
-            return this.transactionHistory.length;
-        }
-        /**
-         * Debug: Print transaction history in a readable format
-         */
-        debugPrintTransactionHistory() {
-            console.log(`\n=== Transaction History (${this.transactionHistory.length} total) ===`);
-            this.transactionHistory.forEach((transaction, index) => {
-                console.log(`\n${index + 1}. ${transaction.type}:`);
-                switch (transaction.type) {
-                    case TransactionTypeEnum.ROBBER_STEAL:
-                        console.log(`  ${transaction.stealerName} stole from ${transaction.victimName}${transaction.stolenResource ? ` (${transaction.stolenResource})` : ' (unknown resource)'}`);
-                        break;
-                    case TransactionTypeEnum.MONOPOLY:
-                        console.log(`  ${transaction.playerName} played monopoly on ${transaction.resourceType}, stole ${transaction.totalStolen} total`);
-                        break;
-                    case TransactionTypeEnum.TRADE:
-                        console.log(`  Trade between ${transaction.player1} and ${transaction.player2}`);
-                        console.log(`  Resource changes: ${JSON.stringify(transaction.resourceChanges)}`);
-                        break;
-                    case TransactionTypeEnum.TRADE_OFFER:
-                        console.log(`  ${transaction.playerName} offered: ${JSON.stringify(transaction.offeredResources)}`);
-                        break;
-                    case TransactionTypeEnum.RESOURCE_GAIN:
-                        console.log(`  ${transaction.playerName} gained: ${JSON.stringify(transaction.resources)}`);
-                        break;
-                    case TransactionTypeEnum.RESOURCE_LOSS:
-                        console.log(`  ${transaction.playerName} lost: ${JSON.stringify(transaction.resources)}`);
-                        break;
-                    case TransactionTypeEnum.BANK_TRADE:
-                        console.log(`  ${transaction.playerName} bank trade: ${JSON.stringify(transaction.resourceChanges)}`);
-                        break;
-                }
-            });
-        }
-        /**
-         * Clear transaction history (useful for testing or restarting)
-         */
-        clearTransactionHistory() {
-            this.transactionHistory = [];
         }
     }
 
@@ -1574,13 +1558,6 @@
                 12: 0,
             },
             blockedDiceRolls: {},
-            remainingDiscoveryCardsProbabilities: {
-                knights: 0,
-                victoryPoints: 0,
-                yearOfPlenties: 0,
-                roadBuilders: 0,
-                monopolies: 0,
-            },
             youPlayerName: null,
             probableGameState: new PropbableGameState([]),
         };
@@ -1608,6 +1585,16 @@
     function markYouPlayerAsked() {
         isWaitingForYouPlayerSelection = true;
     }
+    function resetGameState() {
+        // Reset game state but keep "you" player info
+        const previousYouPlayer = game.youPlayerName;
+        const previousWaitingStatus = isWaitingForYouPlayerSelection;
+        game = getDefaultGame();
+        // Restore "you" player info
+        game.youPlayerName = previousYouPlayer;
+        isWaitingForYouPlayerSelection = previousWaitingStatus;
+        console.log('🔄 Game state reset, reprocessing messages...');
+    }
     function ensurePlayerExists(playerName, color) {
         const existingPlayer = game.players.find(p => p.name === playerName);
         if (!existingPlayer) {
@@ -1615,7 +1602,6 @@
                 name: playerName,
                 color: color || '#000',
                 resources: { sheep: 0, wheat: 0, brick: 0, tree: 0, ore: 0 },
-                resourceProbabilities: { sheep: 0, wheat: 0, brick: 0, tree: 0, ore: 0 },
                 settlements: 5,
                 cities: 4,
                 roads: 15,
@@ -1628,15 +1614,7 @@
                     roadBuilders: 0,
                     monopolies: 0,
                 },
-                discoveryCardProbabilities: {
-                    knights: 0,
-                    victoryPoints: 0,
-                    yearOfPlenties: 0,
-                    roadBuilders: 0,
-                    monopolies: 0,
-                },
                 totalRobbers: 0,
-                totalCards: 0,
             };
             game.players.push(newPlayer);
         }
@@ -1951,9 +1929,81 @@
     let isResizing = false;
     let currentScale = 1;
     let resizeStartData = { x: 0, y: 0, scale: 1 };
+    let youPlayerSelectedCallback = null;
     // True while content.ts is scrolling the chat to rebuild history after a page
     // load/refresh. The overlay shows a loader instead of (stale/partial) counts.
     let isLoadingHistory = false;
+    // content.ts owns actually resetting and replaying the tracker (it has the
+    // chat container and the history-loading sweep); the overlay just reports
+    // that the reset button was clicked.
+    let resetRequestedCallback = null;
+    // =============================================================================
+    // POP OUT TO A SEPARATE WINDOW
+    // =============================================================================
+    // The window the overlay currently lives in when popped out, or null while
+    // it's sitting in the page. Not the same document as `document` throughout
+    // this file, which is always the colonist.io page's own document.
+    let popoutWindow = null;
+    let popoutWatcherId = null;
+    function isOverlayPoppedOut() {
+        return !!popoutWindow && !popoutWindow.closed;
+    }
+    /** Move the overlay back into the page and stop watching the popout window. */
+    function bringOverlayHome() {
+        if (popoutWatcherId !== null) {
+            window.clearInterval(popoutWatcherId);
+            popoutWatcherId = null;
+        }
+        popoutWindow = null;
+        if (gameStateOverlay && gameStateOverlay.ownerDocument !== document) {
+            document.body.appendChild(gameStateOverlay);
+            updateOverlayContent(gameStateOverlay);
+        }
+    }
+    /**
+     * Toggle the overlay between sitting on the page and living in its own
+     * browser window (e.g. dragged to a second monitor). The same DOM node is
+     * reused either way — moved with adoptNode/appendChild rather than rebuilt —
+     * so its content keeps updating live in both places without any special
+     * casing elsewhere in this file.
+     *
+     * Dragging and resizing are wired to `document`'s mousemove/mouseup (see
+     * createGameStateOverlay), which only ever means the page's document; the
+     * popout needs the same listeners bound to ITS document for those
+     * interactions to keep working once the overlay moves there.
+     */
+    function togglePopout() {
+        if (isOverlayPoppedOut()) {
+            popoutWindow.close();
+            bringOverlayHome();
+            return;
+        }
+        if (!gameStateOverlay)
+            return;
+        const win = window.open('', 'catan-counter-popout', 'width=480,height=900,resizable=yes');
+        if (!win) {
+            console.warn('🃏 Could not open a popout window — it may have been blocked by the browser.');
+            return;
+        }
+        win.document.title = 'Catan Counter';
+        win.document.body.style.margin = '0';
+        win.document.body.style.background = '#e9ecef';
+        win.document.addEventListener('mousemove', handleMouseMove);
+        win.document.addEventListener('mouseup', stopDragAndResize);
+        win.document.adoptNode(gameStateOverlay);
+        win.document.body.appendChild(gameStateOverlay);
+        popoutWindow = win;
+        // window.close() from the button above fires this immediately via
+        // bringOverlayHome(), but the user can also close the popout with the
+        // browser's own window controls — poll for that so the overlay doesn't
+        // stay stranded in a window that no longer exists.
+        popoutWatcherId = window.setInterval(() => {
+            if (popoutWindow && popoutWindow.closed) {
+                bringOverlayHome();
+            }
+        }, 500);
+        updateOverlayContent(gameStateOverlay);
+    }
     let uiPrefs = {
         resourceViewMode: 'table',
         moreStatsCollapsed: true,
@@ -2105,12 +2155,11 @@
             e.preventDefault();
             return;
         }
-        // Only allow dragging from the header
+        // Only allow dragging from the header, and never from one of its buttons
+        // (checking closest('button') here, rather than an id per button, means a
+        // newly added header button never has to be special-cased in this list).
         const header = gameStateOverlay.querySelector('#overlay-header');
-        if (!(header === null || header === void 0 ? void 0 : header.contains(target)) ||
-            target.id === 'minimize-btn' ||
-            target.id === 'save-log-btn' ||
-            target.id === 'view-toggle-btn')
+        if (!(header === null || header === void 0 ? void 0 : header.contains(target)) || target.closest('button'))
             return;
         isDragging = true;
         const rect = gameStateOverlay.getBoundingClientRect();
@@ -2211,12 +2260,18 @@
             resourceNames.forEach((resource, index) => {
                 const resourceKey = resource;
                 const minCount = probabilities.minimumResources[resourceKey];
-                const additionalProb = probabilities.additionalResourceProbabilities[resourceKey];
-                // Format: "minimum + probability%"
+                const steps = probabilities.additionalResourceProbabilitySteps[resourceKey];
+                // Format: "minimum +step1% +step2% ..." — usually just one extra
+                // badge, but several unresolved steals landing on the same player can
+                // spread their hand across more than one card of the same resource,
+                // so each rung of the probability ladder gets its own badge instead
+                // of being folded into a single misleadingly-confident number.
                 let displayText = minCount.toString();
-                if (additionalProb > 0) {
-                    displayText += ` <span style="color:rgb(47, 120, 23); font-size: 10px;">+${additionalProb.toFixed(2)}</span>`;
-                }
+                steps.forEach(stepProbability => {
+                    if (stepProbability > 0) {
+                        displayText += ` <span style="color:rgb(47, 120, 23); font-size: 10px;">+${stepProbability.toFixed(2)}</span>`;
+                    }
+                });
                 table += `<td style="padding: 8px; border: 1px solid #ddd; text-align: center; width: 65px;background: ${resourceColors[index]}; font-weight: bold;">
         ${displayText}
       </td>`;
@@ -2235,23 +2290,33 @@
     const HAND_CARD_OVERLAP_PX = 32;
     /**
      * Render one resource card. A guaranteed card is opaque with a solid border;
-     * an "additional" card (the single blended probability of holding more than
-     * the guaranteed minimum, see getPlayerResourceProbabilities) is drawn with a
-     * dashed border, a probability badge, and a white wash over the art — so
-     * uncertainty reads as "faded ink", not see-through. The card itself stays
-     * fully opaque (`opacity` is never touched) so it still fully occludes
-     * whatever it's stacked on top of; a genuinely transparent card would let a
-     * card behind it bleed through at the overlap.
+     * an "additional" card — one rung of the additionalResourceProbabilitySteps
+     * ladder from getPlayerResourceProbabilities, i.e. the probability of
+     * holding at least `atLeast` more than the guaranteed minimum — is drawn
+     * with a dashed border, a probability badge, and a white wash over the art
+     * so uncertainty reads as "faded ink", not see-through. The card itself
+     * stays fully opaque (`opacity` is never touched) so it still fully
+     * occludes whatever it's stacked on top of; a genuinely transparent card
+     * would let a card behind it bleed through at the overlap.
+     *
+     * A resource can carry more than one of these — e.g. "88% chance of at
+     * least 1 more" AND "25% chance of at least 2 more" — once several
+     * unresolved steals have landed on the same player and spread their hand
+     * further than a single extra card. Each rung renders as its own stacked
+     * card via a separate createHandCardHtml call, `atLeast` only changes the
+     * card's tooltip.
      *
      * `stackOnPrevious` pulls this card left to overlap the one before it in the
      * same resource group. Later cards paint over earlier ones in normal flow,
      * so the last (front) card of a group is always the fully visible one —
-     * which is why the uncertain card, pushed last, ends up on top.
+     * which is why the least-certain rung, pushed last, ends up on top.
      */
     function createHandCardHtml(resource, options) {
+        var _a;
         const iconUrl = getResourceIconUrl(resource);
         const probability = options === null || options === void 0 ? void 0 : options.probability;
         const isUncertain = probability !== undefined;
+        const atLeast = (_a = options === null || options === void 0 ? void 0 : options.atLeast) !== null && _a !== void 0 ? _a : 1;
         // Whiten more heavily at low probability, tapering off as probability
         // rises (mirrors the old opacity curve, just as an opaque wash instead of
         // true transparency: floor ~10% wash near-certain, ~65% wash near-zero).
@@ -2278,7 +2343,7 @@
       ">${Math.round(probability * 100)}%</span>`
             : '';
         const title = isUncertain
-            ? `Maybe ${formatResourceName(resource)} (${Math.round(probability * 100)}% chance of one more)`
+            ? `Maybe ${formatResourceName(resource)} (${Math.round(probability * 100)}% chance of at least ${atLeast} more)`
             : formatResourceName(resource);
         const overlapStyle = (options === null || options === void 0 ? void 0 : options.stackOnPrevious)
             ? `margin-left: -${HAND_CARD_OVERLAP_PX}px;`
@@ -2307,8 +2372,8 @@
      * Alternative to generateResourceProbabilityTable(): renders each player's
      * resources as a row of cards (colonist's own hand tray, reusing the same
      * card art) instead of a numeric table. Uses the exact same underlying data
-     * (minimumResources / additionalResourceProbabilities) so the two views never
-     * disagree — only the presentation differs.
+     * (minimumResources / additionalResourceProbabilitySteps) so the two views
+     * never disagree — only the presentation differs.
      */
     function generateResourceHandView() {
         if (!game.probableGameState || game.players.length === 0) {
@@ -2322,20 +2387,28 @@
             let knownTotal = 0;
             resourceNames.forEach(resource => {
                 const minCount = probabilities.minimumResources[resource];
-                const additionalProb = probabilities.additionalResourceProbabilities[resource];
+                const steps = probabilities.additionalResourceProbabilitySteps[resource];
                 knownTotal += minCount;
                 for (let i = 0; i < minCount; i++) {
                     cards.push(createHandCardHtml(resource, { stackOnPrevious: i > 0 }));
                 }
-                if (additionalProb > 0) {
+                // One card per rung of the ladder — usually just one ("probably 1
+                // more"), but several unresolved steals landing on the same player
+                // can genuinely spread their hand across more than one extra card of
+                // the same resource, and each rung gets its own fading, lower-odds
+                // card instead of being folded into the first one.
+                steps.forEach((stepProbability, index) => {
+                    if (stepProbability <= 0)
+                        return;
                     cards.push(createHandCardHtml(resource, {
-                        probability: additionalProb,
-                        // Only the very first card of a group (this one, if it's the
-                        // only card) sits flush; otherwise it fans out on top of the
-                        // guaranteed cards ahead of it, becoming the visible "front" card.
-                        stackOnPrevious: minCount > 0,
+                        probability: stepProbability,
+                        atLeast: index + 1,
+                        // Only the very first card of a group (no guaranteed cards and
+                        // this is also the first rung) sits flush; every other card
+                        // fans out on top of whatever came before it in the group.
+                        stackOnPrevious: minCount > 0 || index > 0,
                     }));
-                }
+                });
             });
             html += `
       <div data-player-hand="${player.name}" style="
@@ -2701,8 +2774,8 @@
             ? generateResourceHandView()
             : generateResourceProbabilityTable();
         const resourceCaption = uiPrefs.resourceViewMode === 'hand'
-            ? 'Solid cards are guaranteed; whitened dashed cards show the chance of one more.'
-            : 'Numbers shown are guaranteed resources, additional resources are shown as a probability';
+            ? 'Solid cards are guaranteed; each whitened dashed card shows the chance of having at least that many more.'
+            : 'Numbers shown are guaranteed resources; each extra number is the probability of having at least that many more';
         const moreStats = uiPrefs.moreStatsCollapsed
             ? ''
             : `
@@ -2806,6 +2879,24 @@
           padding: 2px 6px;
           border-radius: 3px;
         " title="Download this game's chat log as JSON">💾</button>
+        <button id="reset-btn" style="
+          background: none;
+          border: none;
+          color: white;
+          cursor: pointer;
+          font-size: 14px;
+          padding: 2px 6px;
+          border-radius: 3px;
+        " title="Reset tracker (reload from chat history)">🔄</button>
+        <button id="popout-btn" style="
+          background: none;
+          border: ${isOverlayPoppedOut() ? '1px solid rgba(255,255,255,0.6)' : 'none'};
+          color: white;
+          cursor: pointer;
+          font-size: 14px;
+          padding: 2px 6px;
+          border-radius: 3px;
+        " title="${isOverlayPoppedOut() ? 'Return to page' : 'Open in a separate window'}">🗗</button>
         <button id="minimize-btn" style="
           background: none;
           border: none;
@@ -2889,6 +2980,22 @@
                 downloadCurrentGameLog();
             });
         }
+        // Add reset button functionality
+        const resetBtn = overlay.querySelector('#reset-btn');
+        if (resetBtn) {
+            resetBtn.addEventListener('click', e => {
+                e.stopPropagation();
+                resetRequestedCallback === null || resetRequestedCallback === void 0 ? void 0 : resetRequestedCallback();
+            });
+        }
+        // Add popout button functionality
+        const popoutBtn = overlay.querySelector('#popout-btn');
+        if (popoutBtn) {
+            popoutBtn.addEventListener('click', e => {
+                e.stopPropagation();
+                togglePopout();
+            });
+        }
         // Add event listeners for transaction items
         const transactionItems = overlay.querySelectorAll('.unknown-transaction-item');
         transactionItems.forEach(item => {
@@ -2922,6 +3029,13 @@
             // Reapply the current scale after updating content
             gameStateOverlay.style.transform = `scale(${currentScale})`;
         }
+    }
+    function setYouPlayerSelectedCallback(callback) {
+        youPlayerSelectedCallback = callback;
+    }
+    /** Registers what happens when the reset button is clicked — see resetRequestedCallback. */
+    function setResetRequestedCallback(callback) {
+        resetRequestedCallback = callback;
     }
     /**
      * Toggle the "loading game history" state. While true the overlay shows a
@@ -3003,6 +3117,10 @@
                     setYouPlayer(playerName);
                     console.log(`🎯 "You" player set to: ${playerName}`);
                     document.body.removeChild(backdrop);
+                    // Trigger reprocessing callback if provided
+                    if (youPlayerSelectedCallback) {
+                        youPlayerSelectedCallback();
+                    }
                 }
             });
         });
@@ -3741,6 +3859,13 @@
         hasPending() {
             return this.pending.size > 0;
         }
+        /** Discard all buffered rows and the dedup high-water mark, so the next
+         * capture()/drain() pass starts clean from data-index 0 — used when
+         * resetting the tracker to replay the chat from scratch. */
+        reset() {
+            this.pending.clear();
+            this.lastProcessed = -1;
+        }
     }
 
     // content.ts
@@ -3865,6 +3990,36 @@
             messageBuffer.flush();
         });
     }
+    /**
+     * Wipes the tracker back to a blank slate and rebuilds it by replaying the
+     * chat from scratch — the same virtualized-scroll sweep used on first load.
+     * Two callers:
+     *  - The overlay's reset button, to recover from a stuck/corrupted tracker
+     *    state without a full page reload.
+     *  - Manually selecting who "you" are (showYouPlayerDialog), since
+     *    resetGameState() preserves game.youPlayerName across the wipe — so this
+     *    replay is what retroactively corrects every "stolen from you" case the
+     *    tracker couldn't resolve before "you" was known.
+     */
+    function resetTracker() {
+        const chatContainer = findChatContainer();
+        if (!chatContainer) {
+            console.warn('⚠️ Reset requested but the chat container is gone — try reloading the page instead.');
+            return;
+        }
+        console.log('🔄 Resetting tracker and replaying chat history...');
+        messageBuffer.reset();
+        resetGameState();
+        setHistoryLoading(true);
+        loadChatHistory(chatContainer)
+            .then(() => {
+            console.log('✅ Tracker reset complete');
+            applyHandCountResolution();
+        })
+            .finally(() => {
+            setHistoryLoading(false);
+        });
+    }
     function tryFindChat() {
         const chatContainer = findChatContainer();
         if (chatContainer) {
@@ -3913,6 +4068,10 @@
     // of always defaulting. Independent of chat detection, so this doesn't need
     // to wait on it.
     void initOverlayPreferences();
+    // Wire the overlay's reset button, and picking "you" from the setup dialog,
+    // to the same reset-and-replay logic above.
+    setResetRequestedCallback(resetTracker);
+    setYouPlayerSelectedCallback(resetTracker);
     // Start polling every 2 seconds
     const intervalId = window.setInterval(tryFindChat, 2000);
     // Optionally run immediately

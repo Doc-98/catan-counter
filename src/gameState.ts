@@ -43,13 +43,6 @@ export function getDefaultGame(): GameType {
       12: 0,
     },
     blockedDiceRolls: {},
-    remainingDiscoveryCardsProbabilities: {
-      knights: 0,
-      victoryPoints: 0,
-      yearOfPlenties: 0,
-      roadBuilders: 0,
-      monopolies: 0,
-    },
     youPlayerName: null,
     probableGameState: new PropbableGameState([]),
   };
@@ -116,7 +109,6 @@ export function ensurePlayerExists(playerName: string, color?: string): void {
       name: playerName,
       color: color || '#000',
       resources: { sheep: 0, wheat: 0, brick: 0, tree: 0, ore: 0 },
-      resourceProbabilities: { sheep: 0, wheat: 0, brick: 0, tree: 0, ore: 0 },
       settlements: 5,
       cities: 4,
       roads: 15,
@@ -129,15 +121,7 @@ export function ensurePlayerExists(playerName: string, color?: string): void {
         roadBuilders: 0,
         monopolies: 0,
       },
-      discoveryCardProbabilities: {
-        knights: 0,
-        victoryPoints: 0,
-        yearOfPlenties: 0,
-        roadBuilders: 0,
-        monopolies: 0,
-      },
       totalRobbers: 0,
-      totalCards: 0,
     };
     game.players.push(newPlayer);
   }

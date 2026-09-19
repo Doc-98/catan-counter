@@ -9,6 +9,8 @@ import {
   setHistoryLoading,
   updateGameStateDisplay,
   initOverlayPreferences,
+  setResetRequestedCallback,
+  setYouPlayerSelectedCallback,
 } from './overlay.js';
 import { resetGameState, autoDetectCurrentPlayer } from './gameState.js';
 import {
@@ -151,6 +153,39 @@ async function loadChatHistory(chatContainer: HTMLElement): Promise<void> {
   messageBuffer.flush();
 }
 
+/**
+ * Wipes the tracker back to a blank slate and rebuilds it by replaying the
+ * chat from scratch — the same virtualized-scroll sweep used on first load.
+ * Two callers:
+ *  - The overlay's reset button, to recover from a stuck/corrupted tracker
+ *    state without a full page reload.
+ *  - Manually selecting who "you" are (showYouPlayerDialog), since
+ *    resetGameState() preserves game.youPlayerName across the wipe — so this
+ *    replay is what retroactively corrects every "stolen from you" case the
+ *    tracker couldn't resolve before "you" was known.
+ */
+function resetTracker(): void {
+  const chatContainer = findChatContainer();
+  if (!chatContainer) {
+    console.warn('⚠️ Reset requested but the chat container is gone — try reloading the page instead.');
+    return;
+  }
+
+  console.log('🔄 Resetting tracker and replaying chat history...');
+  messageBuffer.reset();
+  resetGameState();
+
+  setHistoryLoading(true);
+  loadChatHistory(chatContainer)
+    .then(() => {
+      console.log('✅ Tracker reset complete');
+      applyHandCountResolution();
+    })
+    .finally(() => {
+      setHistoryLoading(false);
+    });
+}
+
 function tryFindChat(): void {
   const chatContainer = findChatContainer();
 
@@ -194,51 +229,6 @@ function tryFindChat(): void {
   }
 }
 
-function reprocessAllMessages(): void {
-  // Find all chat messages
-  const chatElements = findAllChatMessages();
-
-  if (chatElements.length > 0) {
-    console.log(`🔄 Reprocessing ${chatElements.length} chat messages...`);
-
-    // Reset game state but keep "you" player info
-    resetGameState();
-
-    // Process all messages in order
-    chatElements.forEach((element, index) => {
-      console.log(`Processing message ${index + 1}/${chatElements.length}`);
-      updateGameFromChat(element);
-    });
-
-    console.log('✅ Finished reprocessing all messages');
-  }
-}
-
-function findAllChatMessages(): HTMLElement[] {
-  // Try to find the chat container using the same logic as domUtils
-  const divs = document.querySelectorAll<HTMLDivElement>('div');
-
-  for (const outerDiv of Array.from(divs)) {
-    const firstChild = outerDiv.firstElementChild;
-
-    if (firstChild?.tagName === 'DIV') {
-      for (const child of Array.from(firstChild.children)) {
-        if (child.tagName === 'SPAN') {
-          const anchor = child.querySelector<HTMLAnchorElement>(
-            'a[href="#open-rulebook"]'
-          );
-          if (anchor) {
-            // Found the chat container, return all its child elements
-            return Array.from(outerDiv.children) as HTMLElement[];
-          }
-        }
-      }
-    }
-  }
-
-  return [];
-}
-
 // Console access to the stored game logs. From the page's DevTools console,
 // select the extension's content-script context, then run:
 //   __catanCounter.exportAllGameLogs()
@@ -251,6 +241,11 @@ function findAllChatMessages(): HTMLElement[] {
 // of always defaulting. Independent of chat detection, so this doesn't need
 // to wait on it.
 void initOverlayPreferences();
+
+// Wire the overlay's reset button, and picking "you" from the setup dialog,
+// to the same reset-and-replay logic above.
+setResetRequestedCallback(resetTracker);
+setYouPlayerSelectedCallback(resetTracker);
 
 // Start polling every 2 seconds
 const intervalId: number = window.setInterval(tryFindChat, 2000);
