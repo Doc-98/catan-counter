@@ -2078,6 +2078,7 @@
     let isResizing = false;
     let currentScale = 1;
     let resizeStartData = { x: 0, y: 0, scale: 1 };
+    let youPlayerSelectedCallback = null;
     // True while content.ts is scrolling the chat to rebuild history after a page
     // load/refresh. The overlay shows a loader instead of (stale/partial) counts.
     let isLoadingHistory = false;
@@ -3178,6 +3179,9 @@
             gameStateOverlay.style.transform = `scale(${currentScale})`;
         }
     }
+    function setYouPlayerSelectedCallback(callback) {
+        youPlayerSelectedCallback = callback;
+    }
     /** Registers what happens when the reset button is clicked — see resetRequestedCallback. */
     function setResetRequestedCallback(callback) {
         resetRequestedCallback = callback;
@@ -3262,6 +3266,10 @@
                     setYouPlayer(playerName);
                     console.log(`🎯 "You" player set to: ${playerName}`);
                     document.body.removeChild(backdrop);
+                    // Trigger reprocessing callback if provided
+                    if (youPlayerSelectedCallback) {
+                        youPlayerSelectedCallback();
+                    }
                 }
             });
         });
@@ -4132,10 +4140,15 @@
         });
     }
     /**
-     * Reset button handler: wipes the tracker back to a blank slate and rebuilds
-     * it by replaying the chat from scratch — the same virtualized-scroll sweep
-     * used on first load — instead of requiring a full page reload to recover
-     * from a stuck/corrupted tracker state.
+     * Wipes the tracker back to a blank slate and rebuilds it by replaying the
+     * chat from scratch — the same virtualized-scroll sweep used on first load.
+     * Two callers:
+     *  - The overlay's reset button, to recover from a stuck/corrupted tracker
+     *    state without a full page reload.
+     *  - Manually selecting who "you" are (showYouPlayerDialog), since
+     *    resetGameState() preserves game.youPlayerName across the wipe — so this
+     *    replay is what retroactively corrects every "stolen from you" case the
+     *    tracker couldn't resolve before "you" was known.
      */
     function resetTracker() {
         const chatContainer = findChatContainer();
@@ -4204,8 +4217,10 @@
     // of always defaulting. Independent of chat detection, so this doesn't need
     // to wait on it.
     void initOverlayPreferences();
-    // Wire the overlay's reset button to the actual reset-and-replay logic above.
+    // Wire the overlay's reset button, and picking "you" from the setup dialog,
+    // to the same reset-and-replay logic above.
     setResetRequestedCallback(resetTracker);
+    setYouPlayerSelectedCallback(resetTracker);
     // Start polling every 2 seconds
     const intervalId = window.setInterval(tryFindChat, 2000);
     // Optionally run immediately

@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals
 import {
   showGameStateOverlay,
   setResetRequestedCallback,
+  setYouPlayerSelectedCallback,
+  showYouPlayerDialog,
   _resetOverlayForTesting,
 } from '../overlay';
 import { resetGameState, game } from '../gameState';
@@ -47,6 +49,40 @@ describe('overlay reset button', () => {
     const resetBtn = overlay.querySelector('#reset-btn') as HTMLButtonElement;
 
     expect(() => resetBtn.click()).not.toThrow();
+  });
+});
+
+describe('you-player selection triggers a reprocess', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '';
+    resetGameState();
+    _resetOverlayForTesting();
+    (globalThis as any).chrome = { runtime: { getURL: (p: string) => p } };
+
+    placeSettlement('Alice');
+    placeSettlement('Bob');
+    game.probableGameState = new PropbableGameState(game.players);
+    game.hasRolledFirstDice = true;
+  });
+
+  it('calls the registered callback, with youPlayerName already set, after picking a player', () => {
+    const onYouSelected = jest.fn(() => {
+      // content.ts's real callback (resetTracker -> resetGameState) relies
+      // on this already being set by the time it fires.
+      expect(game.youPlayerName).toBe('Bob');
+    });
+    setYouPlayerSelectedCallback(onYouSelected);
+
+    showYouPlayerDialog();
+
+    const button = document.querySelector(
+      '[data-player="Bob"]'
+    ) as HTMLButtonElement;
+    expect(button).toBeTruthy();
+    button.click();
+
+    expect(game.youPlayerName).toBe('Bob');
+    expect(onYouSelected).toHaveBeenCalledTimes(1);
   });
 });
 
