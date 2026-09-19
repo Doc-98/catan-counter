@@ -501,6 +501,38 @@
             return mergedVariants.sort((a, b) => b.probability - a.probability);
         }
         /**
+         * Keep only the `maxLeaves` highest-cumulative-probability leaves,
+         * removing the rest — a hard, unconditional ceiling on tree size (see
+         * trackerConfig.maxVariants for why this exists: unresolved steals branch
+         * multiplicatively, and probability-based culling has nothing to prune
+         * when a victim's holdings stay roughly balanced across several of them
+         * in a row, so variant count — and the cost of every later computation
+         * over it — can otherwise grow unchecked).
+         *
+         * No-op if already at or under the cap. Removes leaves one at a time via
+         * the existing removeVariantNode (so sibling probabilities keep
+         * rebalancing correctly and a tree that happens to collapse to one path
+         * mid-removal is handled the same way any other pruning path handles it).
+         */
+        capVariantCount(maxLeaves) {
+            const leaves = this.getCurrentVariantNodes();
+            if (leaves.length <= maxLeaves)
+                return;
+            const ranked = leaves.map(node => {
+                let probability = node.probability;
+                let parent = node.parent;
+                while (parent) {
+                    probability *= parent.probability;
+                    parent = parent.parent;
+                }
+                return { node, probability };
+            });
+            ranked.sort((a, b) => b.probability - a.probability);
+            for (const { node } of ranked.slice(maxLeaves)) {
+                this.removeVariantNode(node);
+            }
+        }
+        /**
          * Collapse the tree to a single node when every leaf agrees on the current
          * game state.
          *
@@ -1009,6 +1041,44 @@
         }
     }
 
+    // trackerConfig.ts
+    // Tuning switches for the variant tracker.
+    const trackerConfig = {
+        /**
+         * Approximate refinements: cull outcome branches below 3% probability and
+         * auto-resolve steals once one outcome reaches >= 95%. These trade a small
+         * chance of being wrong for a tighter tree and a shorter unknown-transaction
+         * list; a wrong guess self-heals via the force-apply contradiction handling.
+         *
+         * Off by default: with this off the tracker is exact — it only ever states
+         * what provably follows from the chat. Exact inference (certainty
+         * resolution, convergence collapse, hand-count pruning) is always active
+         * regardless of this flag.
+         */
+        approximateRefinements: false,
+        /**
+         * Hard ceiling on how many simultaneous game-state variants the tracker
+         * keeps, checked after every transaction regardless of
+         * approximateRefinements above.
+         *
+         * Each unresolved steal branches multiplicatively (one branch per resource
+         * type the victim could hold), so a handful in a row without anything to
+         * resolve them can explode the tree combinatorially — and when a victim's
+         * holdings stay roughly balanced across those steals, every branch stays
+         * above approximateRefinements' 3% cull threshold, so that flag alone
+         * doesn't help. Measured directly: 625 variants took ~1.4s to recompute
+         * probabilities for, 3125 took ~20s — on the UI thread, on every chat
+         * message from that point on, which is exactly what a user report of the
+         * extension "freezing" mid-game describes. This cap keeps only the highest-
+         * probability variants once the tree passes it, trading a small chance of
+         * dropping the branch that turns out to be true for staying responsive —
+         * consistent with how cullImprobableOutcomes/autoResolveDominantOutcomes
+         * already trade exactness for speed, just as an unconditional backstop
+         * instead of a probability-gated one.
+         */
+        maxVariants: 150,
+    };
+
     function updateResourceAmount(resources, resourceType, amount) {
         resources[resourceType] += amount;
     }
@@ -1105,11 +1175,17 @@
             }
         }
         /**
-         * Full refinement cycle for unknown transactions: resolve what's certain,
-         * cull vanishingly-unlikely outcome branches, auto-resolve dominant ones,
-         * then resolve again (culling can leave a transaction with one option).
+         * Full refinement cycle for unknown transactions: cap runaway tree growth,
+         * resolve what's certain, cull vanishingly-unlikely outcome branches,
+         * auto-resolve dominant ones, then resolve again (culling can leave a
+         * transaction with one option).
          */
         refineUnknownTransactions() {
+            // Unconditional, regardless of approximateRefinements below — see
+            // trackerConfig.maxVariants. Runs first so everything after it (here and
+            // in every render that follows) operates on an already-bounded tree
+            // instead of paying to compute over one that's already exploded.
+            this.variantTree.capVariantCount(trackerConfig.maxVariants);
             this.resolveAllUnknownTransactions();
             // When every variant agrees on the current hands, remaining branches are
             // purely historical (e.g. a card that made a round trip) — collapse them

@@ -194,6 +194,41 @@ export class VariantTree {
   }
 
   /**
+   * Keep only the `maxLeaves` highest-cumulative-probability leaves,
+   * removing the rest — a hard, unconditional ceiling on tree size (see
+   * trackerConfig.maxVariants for why this exists: unresolved steals branch
+   * multiplicatively, and probability-based culling has nothing to prune
+   * when a victim's holdings stay roughly balanced across several of them
+   * in a row, so variant count — and the cost of every later computation
+   * over it — can otherwise grow unchecked).
+   *
+   * No-op if already at or under the cap. Removes leaves one at a time via
+   * the existing removeVariantNode (so sibling probabilities keep
+   * rebalancing correctly and a tree that happens to collapse to one path
+   * mid-removal is handled the same way any other pruning path handles it).
+   */
+  capVariantCount(maxLeaves: number): void {
+    const leaves = this.getCurrentVariantNodes();
+    if (leaves.length <= maxLeaves) return;
+
+    const ranked = leaves.map(node => {
+      let probability = node.probability;
+      let parent = node.parent;
+      while (parent) {
+        probability *= parent.probability;
+        parent = parent.parent;
+      }
+      return { node, probability };
+    });
+
+    ranked.sort((a, b) => b.probability - a.probability);
+
+    for (const { node } of ranked.slice(maxLeaves)) {
+      this.removeVariantNode(node);
+    }
+  }
+
+  /**
    * Collapse the tree to a single node when every leaf agrees on the current
    * game state.
    *

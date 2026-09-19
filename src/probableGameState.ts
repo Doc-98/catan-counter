@@ -161,11 +161,17 @@ export class PropbableGameState {
   }
 
   /**
-   * Full refinement cycle for unknown transactions: resolve what's certain,
-   * cull vanishingly-unlikely outcome branches, auto-resolve dominant ones,
-   * then resolve again (culling can leave a transaction with one option).
+   * Full refinement cycle for unknown transactions: cap runaway tree growth,
+   * resolve what's certain, cull vanishingly-unlikely outcome branches,
+   * auto-resolve dominant ones, then resolve again (culling can leave a
+   * transaction with one option).
    */
   private refineUnknownTransactions(): void {
+    // Unconditional, regardless of approximateRefinements below — see
+    // trackerConfig.maxVariants. Runs first so everything after it (here and
+    // in every render that follows) operates on an already-bounded tree
+    // instead of paying to compute over one that's already exploded.
+    this.variantTree.capVariantCount(trackerConfig.maxVariants);
     this.resolveAllUnknownTransactions();
     if (trackerConfig.approximateRefinements) {
       this.transactionProcessor.cullImprobableOutcomes();
