@@ -9,6 +9,7 @@ import {
   setHistoryLoading,
   updateGameStateDisplay,
   initOverlayPreferences,
+  setResetRequestedCallback,
 } from './overlay.js';
 import { resetGameState, autoDetectCurrentPlayer } from './gameState.js';
 import {
@@ -151,6 +152,34 @@ async function loadChatHistory(chatContainer: HTMLElement): Promise<void> {
   messageBuffer.flush();
 }
 
+/**
+ * Reset button handler: wipes the tracker back to a blank slate and rebuilds
+ * it by replaying the chat from scratch — the same virtualized-scroll sweep
+ * used on first load — instead of requiring a full page reload to recover
+ * from a stuck/corrupted tracker state.
+ */
+function resetTracker(): void {
+  const chatContainer = findChatContainer();
+  if (!chatContainer) {
+    console.warn('⚠️ Reset requested but the chat container is gone — try reloading the page instead.');
+    return;
+  }
+
+  console.log('🔄 Resetting tracker and replaying chat history...');
+  messageBuffer.reset();
+  resetGameState();
+
+  setHistoryLoading(true);
+  loadChatHistory(chatContainer)
+    .then(() => {
+      console.log('✅ Tracker reset complete');
+      applyHandCountResolution();
+    })
+    .finally(() => {
+      setHistoryLoading(false);
+    });
+}
+
 function tryFindChat(): void {
   const chatContainer = findChatContainer();
 
@@ -251,6 +280,9 @@ function findAllChatMessages(): HTMLElement[] {
 // of always defaulting. Independent of chat detection, so this doesn't need
 // to wait on it.
 void initOverlayPreferences();
+
+// Wire the overlay's reset button to the actual reset-and-replay logic above.
+setResetRequestedCallback(resetTracker);
 
 // Start polling every 2 seconds
 const intervalId: number = window.setInterval(tryFindChat, 2000);

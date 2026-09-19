@@ -202,6 +202,92 @@ let youPlayerSelectedCallback: (() => void) | null = null;
 // True while content.ts is scrolling the chat to rebuild history after a page
 // load/refresh. The overlay shows a loader instead of (stale/partial) counts.
 let isLoadingHistory = false;
+// content.ts owns actually resetting and replaying the tracker (it has the
+// chat container and the history-loading sweep); the overlay just reports
+// that the reset button was clicked.
+let resetRequestedCallback: (() => void) | null = null;
+
+// =============================================================================
+// POP OUT TO A SEPARATE WINDOW
+// =============================================================================
+
+// The window the overlay currently lives in when popped out, or null while
+// it's sitting in the page. Not the same document as `document` throughout
+// this file, which is always the colonist.io page's own document.
+let popoutWindow: Window | null = null;
+let popoutWatcherId: number | null = null;
+
+function isOverlayPoppedOut(): boolean {
+  return !!popoutWindow && !popoutWindow.closed;
+}
+
+/** Move the overlay back into the page and stop watching the popout window. */
+function bringOverlayHome(): void {
+  if (popoutWatcherId !== null) {
+    window.clearInterval(popoutWatcherId);
+    popoutWatcherId = null;
+  }
+  popoutWindow = null;
+  if (gameStateOverlay && gameStateOverlay.ownerDocument !== document) {
+    document.body.appendChild(gameStateOverlay);
+    updateOverlayContent(gameStateOverlay);
+  }
+}
+
+/**
+ * Toggle the overlay between sitting on the page and living in its own
+ * browser window (e.g. dragged to a second monitor). The same DOM node is
+ * reused either way — moved with adoptNode/appendChild rather than rebuilt —
+ * so its content keeps updating live in both places without any special
+ * casing elsewhere in this file.
+ *
+ * Dragging and resizing are wired to `document`'s mousemove/mouseup (see
+ * createGameStateOverlay), which only ever means the page's document; the
+ * popout needs the same listeners bound to ITS document for those
+ * interactions to keep working once the overlay moves there.
+ */
+function togglePopout(): void {
+  if (isOverlayPoppedOut()) {
+    popoutWindow!.close();
+    bringOverlayHome();
+    return;
+  }
+  if (!gameStateOverlay) return;
+
+  const win = window.open(
+    '',
+    'catan-counter-popout',
+    'width=480,height=900,resizable=yes'
+  );
+  if (!win) {
+    console.warn(
+      '🃏 Could not open a popout window — it may have been blocked by the browser.'
+    );
+    return;
+  }
+
+  win.document.title = 'Catan Counter';
+  win.document.body.style.margin = '0';
+  win.document.body.style.background = '#e9ecef';
+  win.document.addEventListener('mousemove', handleMouseMove);
+  win.document.addEventListener('mouseup', stopDragAndResize);
+
+  win.document.adoptNode(gameStateOverlay);
+  win.document.body.appendChild(gameStateOverlay);
+  popoutWindow = win;
+
+  // window.close() from the button above fires this immediately via
+  // bringOverlayHome(), but the user can also close the popout with the
+  // browser's own window controls — poll for that so the overlay doesn't
+  // stay stranded in a window that no longer exists.
+  popoutWatcherId = window.setInterval(() => {
+    if (popoutWindow && popoutWindow.closed) {
+      bringOverlayHome();
+    }
+  }, 500);
+
+  updateOverlayContent(gameStateOverlay);
+}
 
 // =============================================================================
 // OVERLAY UI PREFERENCES (resource view mode, collapsible sections, ...)
@@ -358,6 +444,12 @@ export function _resetOverlayForTesting(): void {
     diceChartCollapsed: false,
     blockedDiceCollapsed: false,
   };
+  resetRequestedCallback = null;
+  if (popoutWatcherId !== null) {
+    window.clearInterval(popoutWatcherId);
+    popoutWatcherId = null;
+  }
+  popoutWindow = null;
 }
 
 function createGameStateOverlay(): HTMLDivElement {
@@ -412,15 +504,11 @@ function startDrag(e: MouseEvent): void {
     return;
   }
 
-  // Only allow dragging from the header
+  // Only allow dragging from the header, and never from one of its buttons
+  // (checking closest('button') here, rather than an id per button, means a
+  // newly added header button never has to be special-cased in this list).
   const header = gameStateOverlay.querySelector('#overlay-header');
-  if (
-    !header?.contains(target) ||
-    target.id === 'minimize-btn' ||
-    target.id === 'save-log-btn' ||
-    target.id === 'view-toggle-btn'
-  )
-    return;
+  if (!header?.contains(target) || target.closest('button')) return;
 
   isDragging = true;
   const rect = gameStateOverlay.getBoundingClientRect();
@@ -1317,6 +1405,24 @@ function updateOverlayContent(overlay: HTMLDivElement): void {
           padding: 2px 6px;
           border-radius: 3px;
         " title="Download this game's chat log as JSON">💾</button>
+        <button id="reset-btn" style="
+          background: none;
+          border: none;
+          color: white;
+          cursor: pointer;
+          font-size: 14px;
+          padding: 2px 6px;
+          border-radius: 3px;
+        " title="Reset tracker (reload from chat history)">🔄</button>
+        <button id="popout-btn" style="
+          background: none;
+          border: ${isOverlayPoppedOut() ? '1px solid rgba(255,255,255,0.6)' : 'none'};
+          color: white;
+          cursor: pointer;
+          font-size: 14px;
+          padding: 2px 6px;
+          border-radius: 3px;
+        " title="${isOverlayPoppedOut() ? 'Return to page' : 'Open in a separate window'}">🗗</button>
         <button id="minimize-btn" style="
           background: none;
           border: none;
@@ -1419,6 +1525,24 @@ function updateOverlayContent(overlay: HTMLDivElement): void {
     });
   }
 
+  // Add reset button functionality
+  const resetBtn = overlay.querySelector('#reset-btn') as HTMLButtonElement;
+  if (resetBtn) {
+    resetBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      resetRequestedCallback?.();
+    });
+  }
+
+  // Add popout button functionality
+  const popoutBtn = overlay.querySelector('#popout-btn') as HTMLButtonElement;
+  if (popoutBtn) {
+    popoutBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      togglePopout();
+    });
+  }
+
   // Add event listeners for transaction items
   const transactionItems = overlay.querySelectorAll(
     '.unknown-transaction-item'
@@ -1466,6 +1590,11 @@ export function updateGameStateDisplay(): void {
 
 export function setYouPlayerSelectedCallback(callback: () => void): void {
   youPlayerSelectedCallback = callback;
+}
+
+/** Registers what happens when the reset button is clicked — see resetRequestedCallback. */
+export function setResetRequestedCallback(callback: () => void): void {
+  resetRequestedCallback = callback;
 }
 
 /**

@@ -68,4 +68,12 @@ export class MessageOrderBuffer {
   hasPending(): boolean {
     return this.pending.size > 0;
   }
+
+  /** Discard all buffered rows and the dedup high-water mark, so the next
+   * capture()/drain() pass starts clean from data-index 0 — used when
+   * resetting the tracker to replay the chat from scratch. */
+  reset(): void {
+    this.pending.clear();
+    this.lastProcessed = -1;
+  }
 }

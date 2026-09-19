@@ -1649,6 +1649,16 @@
     function markYouPlayerAsked() {
         isWaitingForYouPlayerSelection = true;
     }
+    function resetGameState() {
+        // Reset game state but keep "you" player info
+        const previousYouPlayer = game.youPlayerName;
+        const previousWaitingStatus = isWaitingForYouPlayerSelection;
+        game = getDefaultGame();
+        // Restore "you" player info
+        game.youPlayerName = previousYouPlayer;
+        isWaitingForYouPlayerSelection = previousWaitingStatus;
+        console.log('🔄 Game state reset, reprocessing messages...');
+    }
     function ensurePlayerExists(playerName, color) {
         const existingPlayer = game.players.find(p => p.name === playerName);
         if (!existingPlayer) {
@@ -1995,6 +2005,77 @@
     // True while content.ts is scrolling the chat to rebuild history after a page
     // load/refresh. The overlay shows a loader instead of (stale/partial) counts.
     let isLoadingHistory = false;
+    // content.ts owns actually resetting and replaying the tracker (it has the
+    // chat container and the history-loading sweep); the overlay just reports
+    // that the reset button was clicked.
+    let resetRequestedCallback = null;
+    // =============================================================================
+    // POP OUT TO A SEPARATE WINDOW
+    // =============================================================================
+    // The window the overlay currently lives in when popped out, or null while
+    // it's sitting in the page. Not the same document as `document` throughout
+    // this file, which is always the colonist.io page's own document.
+    let popoutWindow = null;
+    let popoutWatcherId = null;
+    function isOverlayPoppedOut() {
+        return !!popoutWindow && !popoutWindow.closed;
+    }
+    /** Move the overlay back into the page and stop watching the popout window. */
+    function bringOverlayHome() {
+        if (popoutWatcherId !== null) {
+            window.clearInterval(popoutWatcherId);
+            popoutWatcherId = null;
+        }
+        popoutWindow = null;
+        if (gameStateOverlay && gameStateOverlay.ownerDocument !== document) {
+            document.body.appendChild(gameStateOverlay);
+            updateOverlayContent(gameStateOverlay);
+        }
+    }
+    /**
+     * Toggle the overlay between sitting on the page and living in its own
+     * browser window (e.g. dragged to a second monitor). The same DOM node is
+     * reused either way — moved with adoptNode/appendChild rather than rebuilt —
+     * so its content keeps updating live in both places without any special
+     * casing elsewhere in this file.
+     *
+     * Dragging and resizing are wired to `document`'s mousemove/mouseup (see
+     * createGameStateOverlay), which only ever means the page's document; the
+     * popout needs the same listeners bound to ITS document for those
+     * interactions to keep working once the overlay moves there.
+     */
+    function togglePopout() {
+        if (isOverlayPoppedOut()) {
+            popoutWindow.close();
+            bringOverlayHome();
+            return;
+        }
+        if (!gameStateOverlay)
+            return;
+        const win = window.open('', 'catan-counter-popout', 'width=480,height=900,resizable=yes');
+        if (!win) {
+            console.warn('🃏 Could not open a popout window — it may have been blocked by the browser.');
+            return;
+        }
+        win.document.title = 'Catan Counter';
+        win.document.body.style.margin = '0';
+        win.document.body.style.background = '#e9ecef';
+        win.document.addEventListener('mousemove', handleMouseMove);
+        win.document.addEventListener('mouseup', stopDragAndResize);
+        win.document.adoptNode(gameStateOverlay);
+        win.document.body.appendChild(gameStateOverlay);
+        popoutWindow = win;
+        // window.close() from the button above fires this immediately via
+        // bringOverlayHome(), but the user can also close the popout with the
+        // browser's own window controls — poll for that so the overlay doesn't
+        // stay stranded in a window that no longer exists.
+        popoutWatcherId = window.setInterval(() => {
+            if (popoutWindow && popoutWindow.closed) {
+                bringOverlayHome();
+            }
+        }, 500);
+        updateOverlayContent(gameStateOverlay);
+    }
     let uiPrefs = {
         resourceViewMode: 'table',
         moreStatsCollapsed: true,
@@ -2146,12 +2227,11 @@
             e.preventDefault();
             return;
         }
-        // Only allow dragging from the header
+        // Only allow dragging from the header, and never from one of its buttons
+        // (checking closest('button') here, rather than an id per button, means a
+        // newly added header button never has to be special-cased in this list).
         const header = gameStateOverlay.querySelector('#overlay-header');
-        if (!(header === null || header === void 0 ? void 0 : header.contains(target)) ||
-            target.id === 'minimize-btn' ||
-            target.id === 'save-log-btn' ||
-            target.id === 'view-toggle-btn')
+        if (!(header === null || header === void 0 ? void 0 : header.contains(target)) || target.closest('button'))
             return;
         isDragging = true;
         const rect = gameStateOverlay.getBoundingClientRect();
@@ -2871,6 +2951,24 @@
           padding: 2px 6px;
           border-radius: 3px;
         " title="Download this game's chat log as JSON">💾</button>
+        <button id="reset-btn" style="
+          background: none;
+          border: none;
+          color: white;
+          cursor: pointer;
+          font-size: 14px;
+          padding: 2px 6px;
+          border-radius: 3px;
+        " title="Reset tracker (reload from chat history)">🔄</button>
+        <button id="popout-btn" style="
+          background: none;
+          border: ${isOverlayPoppedOut() ? '1px solid rgba(255,255,255,0.6)' : 'none'};
+          color: white;
+          cursor: pointer;
+          font-size: 14px;
+          padding: 2px 6px;
+          border-radius: 3px;
+        " title="${isOverlayPoppedOut() ? 'Return to page' : 'Open in a separate window'}">🗗</button>
         <button id="minimize-btn" style="
           background: none;
           border: none;
@@ -2954,6 +3052,22 @@
                 downloadCurrentGameLog();
             });
         }
+        // Add reset button functionality
+        const resetBtn = overlay.querySelector('#reset-btn');
+        if (resetBtn) {
+            resetBtn.addEventListener('click', e => {
+                e.stopPropagation();
+                resetRequestedCallback === null || resetRequestedCallback === void 0 ? void 0 : resetRequestedCallback();
+            });
+        }
+        // Add popout button functionality
+        const popoutBtn = overlay.querySelector('#popout-btn');
+        if (popoutBtn) {
+            popoutBtn.addEventListener('click', e => {
+                e.stopPropagation();
+                togglePopout();
+            });
+        }
         // Add event listeners for transaction items
         const transactionItems = overlay.querySelectorAll('.unknown-transaction-item');
         transactionItems.forEach(item => {
@@ -2987,6 +3101,10 @@
             // Reapply the current scale after updating content
             gameStateOverlay.style.transform = `scale(${currentScale})`;
         }
+    }
+    /** Registers what happens when the reset button is clicked — see resetRequestedCallback. */
+    function setResetRequestedCallback(callback) {
+        resetRequestedCallback = callback;
     }
     /**
      * Toggle the "loading game history" state. While true the overlay shows a
@@ -3806,6 +3924,13 @@
         hasPending() {
             return this.pending.size > 0;
         }
+        /** Discard all buffered rows and the dedup high-water mark, so the next
+         * capture()/drain() pass starts clean from data-index 0 — used when
+         * resetting the tracker to replay the chat from scratch. */
+        reset() {
+            this.pending.clear();
+            this.lastProcessed = -1;
+        }
     }
 
     // content.ts
@@ -3930,6 +4055,31 @@
             messageBuffer.flush();
         });
     }
+    /**
+     * Reset button handler: wipes the tracker back to a blank slate and rebuilds
+     * it by replaying the chat from scratch — the same virtualized-scroll sweep
+     * used on first load — instead of requiring a full page reload to recover
+     * from a stuck/corrupted tracker state.
+     */
+    function resetTracker() {
+        const chatContainer = findChatContainer();
+        if (!chatContainer) {
+            console.warn('⚠️ Reset requested but the chat container is gone — try reloading the page instead.');
+            return;
+        }
+        console.log('🔄 Resetting tracker and replaying chat history...');
+        messageBuffer.reset();
+        resetGameState();
+        setHistoryLoading(true);
+        loadChatHistory(chatContainer)
+            .then(() => {
+            console.log('✅ Tracker reset complete');
+            applyHandCountResolution();
+        })
+            .finally(() => {
+            setHistoryLoading(false);
+        });
+    }
     function tryFindChat() {
         const chatContainer = findChatContainer();
         if (chatContainer) {
@@ -3978,6 +4128,8 @@
     // of always defaulting. Independent of chat detection, so this doesn't need
     // to wait on it.
     void initOverlayPreferences();
+    // Wire the overlay's reset button to the actual reset-and-replay logic above.
+    setResetRequestedCallback(resetTracker);
     // Start polling every 2 seconds
     const intervalId = window.setInterval(tryFindChat, 2000);
     // Optionally run immediately

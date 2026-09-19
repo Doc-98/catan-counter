@@ -91,4 +91,29 @@ describe('MessageOrderBuffer', () => {
     b.drain();
     expect(spy).toHaveBeenCalledTimes(1);
   });
+
+  it('reset() clears the dedup high-water mark so index 0 can be replayed', () => {
+    buffer.capture(row(0));
+    buffer.capture(row(1));
+    buffer.drain();
+    expect(processed).toEqual(['0', '1']);
+
+    buffer.reset();
+    expect(buffer.hasPending()).toBe(false);
+
+    // Without reset() this would be silently dropped as already-processed.
+    buffer.capture(row(0));
+    buffer.drain();
+    expect(processed).toEqual(['0', '1', '0']);
+  });
+
+  it('reset() drops rows still stuck behind an unfilled gap', () => {
+    buffer.capture(row(0));
+    buffer.capture(row(5)); // stuck behind a gap
+    buffer.drain();
+    expect(buffer.hasPending()).toBe(true);
+
+    buffer.reset();
+    expect(buffer.hasPending()).toBe(false);
+  });
 });
