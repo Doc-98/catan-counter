@@ -29,17 +29,14 @@ export interface UnknownTransaction {
 export interface PlayerType {
   name: string;
   resources: ResourceObjectType;
-  resourceProbabilities: ResourceObjectType;
   settlements: number;
   cities: number;
   roads: number;
   knights: number;
   victoryPoints: number;
   discoveryCards: DiscoveryCardType;
-  discoveryCardProbabilities: DiscoveryCardType;
   totalRobbers: number;
   color: string;
-  totalCards: number;
 }
 
 export enum GameTypeEnum {
@@ -58,7 +55,6 @@ export interface GameType {
   roadBuilders: number;
   monopolies: number;
   diceRolls: DiceRollsType;
-  remainingDiscoveryCardsProbabilities: DiscoveryCardType;
   probableGameState: PropbableGameState;
   hasRolledFirstDice: boolean;
   youPlayerName: string | null;

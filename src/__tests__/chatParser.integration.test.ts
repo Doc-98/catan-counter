@@ -53,7 +53,10 @@ describe('Chat Parser Integration - Steal Tracker Scenario', () => {
       // NickTheSwift should have: 1 wheat (100% probability)
       expect(nickTheSwift).toBeDefined();
       expect(nickTheSwift!.resources.wheat).toBe(1);
-      expect(nickTheSwift!.resourceProbabilities.wheat).toBe(0);
+      expect(
+        game.probableGameState.getPlayerResourceProbabilities('NickTheSwift')
+          .additionalResourceProbabilities.wheat
+      ).toBe(0);
       expect(nickTheSwift!.resources.brick).toBe(0);
       expect(nickTheSwift!.resources.tree).toBe(0);
       expect(nickTheSwift!.resources.sheep).toBe(0);
@@ -62,42 +65,49 @@ describe('Chat Parser Integration - Steal Tracker Scenario', () => {
       // Madel should have: 1 brick (100% probability)
       expect(madel).toBeDefined();
       expect(madel!.resources.brick).toBe(1);
-      expect(madel!.resourceProbabilities.brick).toBe(0);
+      expect(
+        game.probableGameState.getPlayerResourceProbabilities('Madel')
+          .additionalResourceProbabilities.brick
+      ).toBe(0);
       expect(madel!.resources.wheat).toBe(0);
       expect(madel!.resources.tree).toBe(0);
       expect(madel!.resources.sheep).toBe(0);
       expect(madel!.resources.ore).toBe(0);
 
       // Ahab should have: 1 sheep, 4 wheat, 1 tree, 1 ore (various probabilities).
-      // Under uncertainty the engine splits a player's cards into `resources`
-      // (guaranteed minimum) and `resourceProbabilities` (expected extra from
-      // unresolved steals). Summing both fields recovers the player's true card
-      // count regardless of how the variants happened to split it.
+      // Under uncertainty the engine splits a player's cards into a guaranteed
+      // minimum and the probability of holding more (see
+      // getPlayerResourceProbabilities). Summing both recovers the player's
+      // true card count regardless of how the variants happened to split it.
       expect(ahab).toBeDefined();
+      const ahabProbs =
+        game.probableGameState.getPlayerResourceProbabilities('Ahab');
       const ahabTotal =
-        ahab!.resources.sheep +
-        ahab!.resourceProbabilities.sheep +
-        ahab!.resources.wheat +
-        ahab!.resourceProbabilities.wheat +
-        ahab!.resources.tree +
-        ahab!.resourceProbabilities.tree +
-        ahab!.resources.ore +
-        ahab!.resourceProbabilities.ore;
+        ahabProbs.minimumResources.sheep +
+        ahabProbs.additionalResourceProbabilities.sheep +
+        ahabProbs.minimumResources.wheat +
+        ahabProbs.additionalResourceProbabilities.wheat +
+        ahabProbs.minimumResources.tree +
+        ahabProbs.additionalResourceProbabilities.tree +
+        ahabProbs.minimumResources.ore +
+        ahabProbs.additionalResourceProbabilities.ore;
       expect(ahabTotal).toBeCloseTo(6, 1); // 1 sheep + 4 wheat + 1 tree + 1 ore = 7 total
 
       // Canada should have: 2 sheep, 2 wheat, 1 ore (various probabilities)
       expect(canada).toBeDefined();
+      const canadaProbs =
+        game.probableGameState.getPlayerResourceProbabilities('Canada');
       const canadaTotal =
-        canada!.resources.sheep +
-        canada!.resourceProbabilities.sheep +
-        canada!.resources.wheat +
-        canada!.resourceProbabilities.wheat +
-        canada!.resources.ore +
-        canada!.resourceProbabilities.ore +
-        canada!.resources.tree +
-        canada!.resourceProbabilities.tree +
-        canada!.resources.brick +
-        canada!.resourceProbabilities.brick;
+        canadaProbs.minimumResources.sheep +
+        canadaProbs.additionalResourceProbabilities.sheep +
+        canadaProbs.minimumResources.wheat +
+        canadaProbs.additionalResourceProbabilities.wheat +
+        canadaProbs.minimumResources.ore +
+        canadaProbs.additionalResourceProbabilities.ore +
+        canadaProbs.minimumResources.tree +
+        canadaProbs.additionalResourceProbabilities.tree +
+        canadaProbs.minimumResources.brick +
+        canadaProbs.additionalResourceProbabilities.brick;
       expect(canadaTotal).toBeCloseTo(5, 1); // 2 sheep + 2 wheat + 1 ore = 5 total
 
       // Bank should have: 17 ore, 17 sheep, 12 wheat, 18 brick, 18 wood
@@ -232,9 +242,17 @@ describe('Chat Parser Integration - Steal with Only One Resource Type', () => {
     expect(canada!.resources.wheat).toBe(1);
     expect(madel!.resources.tree).toBe(1); // Madel lost 1 tree (2 - 1 = 1)
 
-    // Verify no probabilities remain (steal was resolved as certain)
-    expect(canada!.resourceProbabilities.tree).toBe(0);
-    expect(madel!.resourceProbabilities.tree).toBe(0);
+    // Verify no probabilities remain (steal was resolved as certain) — checked
+    // against the live variant-tree data, not a flat per-player field, since
+    // that's what's actually kept in sync with unresolved steals.
+    expect(
+      game.probableGameState.getPlayerResourceProbabilities('Canada')
+        .additionalResourceProbabilities.tree
+    ).toBe(0);
+    expect(
+      game.probableGameState.getPlayerResourceProbabilities('Madel')
+        .additionalResourceProbabilities.tree
+    ).toBe(0);
 
     // Verify no unresolved transactions remain
     expect(
